@@ -1,0 +1,79 @@
+# === Environnements ===
+**/.env
+**/.env.*
+!**/.env.example
+
+# === Dependances ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+.pnpm-debug.log
+
+# === Builds ===
+dist/
+build/
+.cache/
+.temp/
+out/
+.next/
+
+# === Logs ===
+logs/
+*.log
+*.out
+*.err
+*.pid
+
+# === Tests / Coverage ===
+coverage/
+*.lcov
+.nyc_output/
+test-results/
+junit.xml
+
+# === IDE / Éditeurs ===
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# === OS ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# === Docker ===
+docker-compose.override.yml
+.dockerignore
+
+
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/*.jks
+**/*.keystore
+
+# === Environnements / Cloud ===
+.envrc
+*.tfstate
+*.tfstate.backup
+.terraform/
+*.tfvars
+terraform.tfstate*
+secrets.*
+
+# === Temp / Divers ===
+tmp/
+temp/
+*.bak
+*.tmp
+
+**/apis/*
+**/generated/**
+
+**/deploy.yml
