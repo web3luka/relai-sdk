@@ -1,6 +1,6 @@
 {
   "name": "relai-sdk",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Official SDK for RelayAI - Monetize any API endpoint with x402 micropayments.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -25,7 +25,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/relayai/sdk"
+    "url": "https://github.com/web3luka/relai-sdk"
   },
   "dependencies": {
     "axios": "^1.6.7",
