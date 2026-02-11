@@ -1,139 +1,342 @@
-# relai-sdk
+<h1 align="center">@relai-fi/x402</h1>
 
-Official SDK for RelayAI - Monetize any API endpoint with x402 micropayments.
+<p align="center">
+  <strong>Unified x402 payment SDK for Solana, Base, Avalanche, and SKALE Base.</strong>
+</p>
 
-## Installation
+<p align="center">
+  <a href="https://www.npmjs.com/package/@relai-fi/x402"><img src="https://img.shields.io/npm/v/@relai-fi/x402.svg" alt="npm"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E=18-brightgreen.svg" alt="Node"></a>
+  <a href="https://relai.fi"><img src="https://img.shields.io/badge/Marketplace-relai.fi-blueviolet" alt="Marketplace"></a>
+</p>
 
-```bash
-npm install relai-sdk
-```
+<p align="center">
+  <a href="https://relai.fi"><strong>Browse APIs →</strong></a>
+</p>
+
+---
+
+## What is x402?
+
+x402 is a protocol for HTTP-native micropayments. When a server returns HTTP `402 Payment Required`, it includes payment details in the response. The client signs a payment, retries the request, and the server settles the payment and returns the protected content.
+
+This SDK handles the entire flow automatically — call `fetch()` and payments happen transparently.
+
+---
+
+## Why This SDK?
+
+**Multi-chain.** Solana, Base, Avalanche, and SKALE Base with a single API. Connect your wallets and the SDK picks the right chain and signing method automatically.
+
+**Zero gas fees.** The RelAI facilitator sponsors gas — users only pay for content (USDC).
+
+**Auto-detects signing method.** EIP-3009 `transferWithAuthorization` for all EVM networks (Base, Avalanche, SKALE Base), native SPL transfer for Solana — all handled internally.
+
+**Works out of the box.** Uses the [RelAI facilitator](https://facilitator.x402.fi) by default.
+
+---
 
 ## Quick Start
 
+### Install
+
 ```bash
-npm install relai-sdk
+npm install @relai-fi/x402
 ```
 
-## Get Your API ID
-
-**RelayAI API ID:**
-- Browse the [RelayAI marketplace](https://relai.fi)
-- Find an API you want to use
-- Copy the `apiId` from the API details page
-
-No registration or API keys required for using existing APIs!
-
-## Client-Side Usage
+### Client (Browser / Node.js)
 
 ```typescript
-import { RelaiClient } from 'relai-sdk/client';
+import { createX402Client } from '@relai-fi/x402/client';
 
-const client = new RelaiClient({
-  // Optional: override defaults
-  baseUrl: 'https://relai.fi',          // RelayAI backend base URL
-  network: 'solana',                    // or 'solana-devnet'
-  rpcUrl: 'https://api.mainnet-beta.solana.com',
-
-  // Required: wallet used to sign x402 payments
-  wallet: {
-    address: publicKey.toString(),
-    signTransaction: async (tx) => await signTransaction(tx),
+const client = createX402Client({
+  wallets: {
+    solana: solanaWallet,  // @solana/wallet-adapter compatible
+    evm: evmWallet,        // wagmi/viem compatible
   },
-
-  // Optional: safety limit for a single payment (in lamports)
-  maxPaymentAmount: BigInt(10_000_000),
 });
 
-// Get API instance using apiId from RelayAI dashboard / marketplace
-const api = client.useApi('1762961727264');
-
-// Call API endpoint with automatic x402 payment handling
-const response = await api.call({
-  path: '/api/Public/askstreaming',
-  method: 'POST',
-  body: { prompt: 'Hello world' },
-});
-
-console.log(response.data);
+// 402 responses are handled automatically
+const response = await client.fetch('https://api.example.com/protected');
+const data = await response.json();
 ```
 
-## Features
+### React Hook
 
-- **One-Line Integration**: Add payment gates with a single middleware
-- **Framework Agnostic**: Works with Express, Next.js, and more
-- **Type Safe**: Full TypeScript support
-- **x402 Protocol**: Built on the x402 micropayment standard
-- **Zero Gas Fees**: Users don't pay blockchain gas fees
+Works with [`@solana/wallet-adapter-react`](https://github.com/anza-xyz/wallet-adapter) and [`wagmi`](https://wagmi.sh/):
 
-## API Reference
+```tsx
+import { useRelaiPayment } from '@relai-fi/x402/react';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { useAccount, useSignTypedData } from 'wagmi';
 
-### Client SDK
+function PayButton() {
+  const solanaWallet = useWallet();
+  const { address } = useAccount();
+  const { signTypedDataAsync } = useSignTypedData();
 
-#### `new RelaiClient(config?)`
+  const {
+    fetch,
+    isLoading,
+    status,
+    transactionUrl,
+    transactionNetworkLabel,
+  } = useRelaiPayment({
+    wallets: {
+      solana: solanaWallet,
+      evm: address ? { address, signTypedData: signTypedDataAsync } : undefined,
+    },
+  });
 
-Creates a new RelayAI client instance.
-
-```ts
-interface RelaiClientConfig {
-  baseUrl?: string;
-  network?: 'solana' | 'solana-devnet';
-  rpcUrl?: string;
-  maxPaymentAmount?: bigint;
-  wallet?: {
-    address: string;
-    signTransaction: (tx: any) => Promise<any>;
-  };
-  requestTimeoutMs?: number;
-
-  // Optional hooks
-  onPaymentRequired?: (info: { price: number; description?: string; network?: string }) => void;
-  onPaymentVerified?: (info: { signature: string; price: number }) => void;
-  onError?: (error: unknown) => void;
+  return (
+    <div>
+      <button onClick={() => fetch('/api/protected')} disabled={isLoading}>
+        {isLoading ? 'Paying...' : 'Access API'}
+      </button>
+      {transactionUrl && (
+        <a href={transactionUrl} target="_blank">
+          View on {transactionNetworkLabel}
+        </a>
+      )}
+    </div>
+  );
 }
 ```
 
-#### `client.useApi(apiId)`
+---
 
-Returns a lightweight API helper bound to a specific `apiId` from RelayAI marketplace.
+## Supported Networks
 
-```ts
-const api = client.useApi(apiId);
+| Network | Identifier | CAIP-2 | Signing Method | USDC Contract |
+|---------|-----------|--------|----------------|---------------|
+| **Solana** | `solana` | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | SPL transfer + fee payer | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` |
+| **Base** | `base` | `eip155:8453` | EIP-3009 transferWithAuthorization | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+| **Avalanche** | `avalanche` | `eip155:43114` | EIP-3009 transferWithAuthorization | `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E` |
+| **SKALE Base** | `skale-base` | `eip155:1187947933` | EIP-3009 transferWithAuthorization | `0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20` |
 
-const response = await api.call({
-  path: '/api/your-endpoint',
-  method: 'GET',
-  body: { foo: 'bar' },
-});
-```
+All networks use **USDC** with 6 decimals. Gas fees are sponsored by the RelAI facilitator.
 
-## Examples
+---
 
-### Client Usage
+## Package Exports
 
 ```typescript
-import { RelaiClient } from 'relai-sdk/client';
+// Client — browser & Node.js fetch wrapper with automatic 402 handling
+import { createX402Client } from '@relai-fi/x402/client';
 
-const client = new RelaiClient({
-  baseUrl: 'https://relai.fi',
-  network: 'solana',
-  wallet: {
-    address: publicKey.toString(),
-    signTransaction: async (tx) => await signTransaction(tx),
-  },
-});
+// React hook — state management + wallet integration
+import { useRelaiPayment } from '@relai-fi/x402/react';
 
-// Use apiId from RelayAI dashboard / marketplace
-const api = client.useApi('<your-api-id>');
+// Server — Express middleware for protecting endpoints
+import Relai from '@relai-fi/x402/server';
 
-const response = await api.call({
-  path: '/api/your-endpoint',
-  method: 'POST',
-  body: { message: 'Hello!' },
-});
+// Utilities — payload conversion, unit helpers
+import {
+  convertV1ToV2,
+  convertV2ToV1,
+  networkV1ToV2,
+  networkV2ToV1,
+  toAtomicUnits,
+  fromAtomicUnits,
+} from '@relai-fi/x402/utils';
 
-console.log(response.data);
+// Types & constants
+import {
+  RELAI_NETWORKS,
+  CHAIN_IDS,
+  USDC_ADDRESSES,
+  NETWORK_CAIP2,
+  EXPLORER_TX_URL,
+  type RelaiNetwork,
+  type SolanaWallet,
+  type EvmWallet,
+  type WalletSet,
+} from '@relai-fi/x402';
 ```
+
+---
+
+## API Reference
+
+### `createX402Client(config)`
+
+Creates a fetch wrapper that automatically handles 402 Payment Required responses.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `wallets` | `{ solana?, evm? }` | `{}` | Wallet adapters for each chain |
+| `facilitatorUrl` | `string` | RelAI facilitator | Custom facilitator endpoint |
+| `preferredNetwork` | `RelaiNetwork` | — | Prefer this network when multiple `accepts` |
+| `solanaRpcUrl` | `string` | `https://api.mainnet-beta.solana.com` | Solana RPC (use Helius/Quicknode for production) |
+| `evmRpcUrls` | `Record<string, string>` | Built-in defaults | RPC URLs per network name |
+| `maxAmountAtomic` | `string` | — | Safety cap on payment amount |
+| `verbose` | `boolean` | `false` | Log payment flow to console |
+
+**Wallet interfaces:**
+
+```typescript
+// Solana — compatible with @solana/wallet-adapter-react useWallet()
+interface SolanaWallet {
+  publicKey: { toString(): string } | null;
+  signTransaction: ((tx: unknown) => Promise<unknown>) | null;
+}
+
+// EVM — pass address + signTypedData from wagmi
+interface EvmWallet {
+  address: string;
+  signTypedData: (params: {
+    domain: Record<string, unknown>;
+    types: Record<string, unknown[]>;
+    message: Record<string, unknown>;
+    primaryType: string;
+  }) => Promise<string>;
+}
+```
+
+---
+
+### `useRelaiPayment(config)`
+
+React hook wrapping `createX402Client` with state management.
+
+**Config** — same as `createX402Client` (see above).
+
+**Returns:**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `fetch` | `(input, init?) => Promise<Response>` | Payment-aware fetch |
+| `isLoading` | `boolean` | Payment in progress |
+| `status` | `'idle' \| 'pending' \| 'success' \| 'error'` | Current state |
+| `error` | `Error \| null` | Error details on failure |
+| `transactionId` | `string \| null` | Tx hash/signature on success |
+| `transactionNetwork` | `RelaiNetwork \| null` | Network used for payment |
+| `transactionNetworkLabel` | `string \| null` | Human-readable label (e.g. "Base") |
+| `transactionUrl` | `string \| null` | Block explorer link |
+| `connectedChains` | `{ solana: boolean, evm: boolean }` | Which wallets are connected |
+| `isConnected` | `boolean` | Any wallet connected |
+| `reset` | `() => void` | Reset state to idle |
+
+---
+
+### Server SDK (Express)
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+
+const relai = new Relai({
+  network: 'base', // or 'solana', 'avalanche', 'skale-base'
+});
+
+// Protect any Express route with micropayments
+app.get('/api/data', relai.protect({
+  payTo: '0xYourWallet',
+  price: 0.01,  // $0.01 USDC
+  description: 'Premium data access',
+}), (req, res) => {
+  // req.payment = { verified, transactionId, payer, network, amount }
+  res.json({ data: 'Protected content', payment: req.payment });
+});
+
+// Dynamic pricing
+app.get('/api/premium', relai.protect({
+  payTo: '0xYourWallet',
+  price: (req) => req.query.tier === 'pro' ? 0.10 : 0.01,
+}), handler);
+
+// Per-endpoint network override
+app.get('/api/solana-data', relai.protect({
+  payTo: 'SolanaWalletAddress',
+  price: 0.005,
+  network: 'solana', // overrides the default 'base'
+}), handler);
+```
+
+**Flow:**
+1. Request without payment → 402 with `accepts` array
+2. Client signs payment (SDK handles this) → retries with `X-PAYMENT` header
+3. Server calls RelAI facilitator `/settle` → gas sponsored by RelAI
+4. Settlement success → `PAYMENT-RESPONSE` header set, `req.payment` populated, `next()` called
+
+**`req.payment` fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `verified` | `boolean` | Always `true` after settlement |
+| `transactionId` | `string` | On-chain transaction hash |
+| `payer` | `string` | Payer wallet address |
+| `network` | `string` | Network name (e.g., `base`) |
+| `amount` | `number` | Price in USD |
+
+---
+
+## Utilities
+
+```typescript
+import { toAtomicUnits, fromAtomicUnits } from '@relai-fi/x402/utils';
+
+toAtomicUnits(0.05, 6);       // '50000'   ($0.05 USDC)
+toAtomicUnits(1.50, 6);       // '1500000' ($1.50 USDC)
+
+fromAtomicUnits('50000', 6);  // 0.05
+fromAtomicUnits('1500000', 6); // 1.5
+```
+
+### Payload Conversion (v1 ↔ v2)
+
+```typescript
+import { convertV1ToV2, convertV2ToV1, networkV1ToV2 } from '@relai-fi/x402/utils';
+
+networkV1ToV2('solana');     // 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp'
+networkV1ToV2('base');       // 'eip155:8453'
+networkV1ToV2('avalanche');  // 'eip155:43114'
+networkV1ToV2('skale-base'); // 'eip155:1187947933'
+
+const v2Payload = convertV1ToV2(v1Payload);
+const v1Payload = convertV2ToV1(v2Payload);
+```
+
+---
+
+## How It Works
+
+```
+Client                        Server                     Facilitator
+  |                             |                             |
+  |── GET /api/data ──────────>|                             |
+  |<── 402 Payment Required ───|                             |
+  |   (accepts: network, amount, asset)                      |
+  |                             |                             |
+  | SDK signs payment           |                             |
+  | (EIP-3009/SPL)              |                             |
+  |                             |                             |
+  |── GET /api/data ──────────>|                             |
+  |   X-PAYMENT: <signed>      |── settle ─────────────────>|
+  |                             |<── tx hash ────────────────|
+  |<── 200 OK + data ─────────|                             |
+  |   PAYMENT-RESPONSE: <tx>   |                             |
+```
+
+---
+
+## Development
+
+```bash
+npm run build        # Build ESM + CJS bundles
+npm run dev          # Watch mode
+npm run type-check   # TypeScript checks
+npm test             # Run tests
+```
+
+---
 
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  <a href="https://facilitator.x402.fi">RelAI Facilitator</a> · 
+  <a href="https://relai.fi">Marketplace</a> ·
+  <a href="https://github.com/web3luka/relai-sdk">GitHub</a>
+</p>

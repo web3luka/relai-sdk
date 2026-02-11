@@ -1,10 +1,11 @@
 {
-  "name": "relai-sdk",
-  "version": "0.0.2",
-  "description": "Official SDK for RelayAI - Monetize any API endpoint with x402 micropayments.",
-  "main": "dist/index.js",
-  "module": "dist/index.mjs",
+  "name": "@relai-fi/x402",
+  "version": "0.2.0",
+  "description": "Unified x402 payment SDK for Solana, Base, Avalanche, and SKALE Base. Automatic 402 handling with zero gas fees.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
+  "type": "module",
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -13,46 +14,79 @@
     "type-check": "tsc --noEmit"
   },
   "keywords": [
-    "api",
-    "monetization",
-    "micropayments",
     "x402",
     "solana",
-    "blockchain",
-    "payments"
+    "evm",
+    "base",
+    "avalanche",
+    "skale",
+    "payments",
+    "micropayments",
+    "relai",
+    "web3",
+    "crypto",
+    "usdc"
   ],
-  "author": "RelayAI",
+  "author": "RelAI",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/web3luka/relai-sdk"
   },
   "dependencies": {
-    "axios": "^1.6.7",
-    "x402-solana": "latest"
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "axios": "^1.6.7"
   },
   "devDependencies": {
     "@types/node": "^20.19.24",
+    "@types/react": "^18.0.0",
     "eslint": "^8.0.0",
+    "react": "^18.0.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3",
     "vitest": "^1.0.0"
   },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
     },
     "./server": {
       "types": "./dist/server.d.ts",
-      "import": "./dist/server.mjs",
-      "require": "./dist/server.js"
+      "import": "./dist/server.js",
+      "require": "./dist/server.cjs"
     },
     "./client": {
       "types": "./dist/client.d.ts",
-      "import": "./dist/client.mjs",
-      "require": "./dist/client.js"
+      "import": "./dist/client.js",
+      "require": "./dist/client.cjs"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js",
+      "require": "./dist/react/index.cjs"
+    },
+    "./utils": {
+      "types": "./dist/utils/index.d.ts",
+      "import": "./dist/utils/index.js",
+      "require": "./dist/utils/index.cjs"
     }
   }
 }

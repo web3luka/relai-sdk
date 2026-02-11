@@ -1,4 +1,30 @@
 // src/index.ts
+
+// Server-side (Express middleware)
 export { default as Relai, Relai as default } from './server';
-export { default as RelaiClient } from './client';
+export type { RelaiServerConfig, ProtectOptions, SettleResult, PaymentInfo, DynamicPrice } from './server';
+
+// Client-side (fetch wrapper)
+export { createX402Client } from './client';
+export type { X402ClientConfig, X402Client } from './client';
+
+// All types & constants
 export * from './types';
+
+// Utility re-exports
+export {
+  convertV1ToV2,
+  convertV2ToV1,
+  convertPayloadToVersion,
+  detectPayloadVersion,
+  normalizePaymentHeader,
+  networkV1ToV2,
+  networkV2ToV1,
+  isSolanaNetwork,
+  isEvmNetwork,
+  NETWORK_V1_TO_V2,
+  NETWORK_V2_TO_V1,
+  toAtomicUnits,
+  fromAtomicUnits,
+  formatUsd,
+} from './utils/payload-converter';
