@@ -75,8 +75,11 @@ const PERMIT_NETWORKS = new Set<string>([]);
 // Default EVM RPC URLs
 const DEFAULT_EVM_RPC_URLS: Record<string, string> = {
   'skale-base': 'https://skale-base.skalenodes.com/v1/base',
+  'skale-bite': 'https://base-sepolia-testnet.skalenodes.com/v1/bite-v2-sandbox',
   'base': 'https://mainnet.base.org',
   'avalanche': 'https://api.avax.network/ext/bc/C/rpc',
+  'polygon': 'https://polygon-rpc.com',
+  'ethereum': 'https://ethereum-rpc.publicnode.com',
 };
 
 export function createX402Client(config: X402ClientConfig): X402Client {

@@ -259,7 +259,7 @@ export function isSolanaNetwork(network: string): boolean {
  * Check if network is EVM-based
  */
 export function isEvmNetwork(network: string): boolean {
-  const evmNetworks = ['base', 'base-sepolia', 'ethereum', 'polygon', 'avalanche', 'skale-base', 'peaq', 'sei'];
+  const evmNetworks = ['base', 'base-sepolia', 'ethereum', 'polygon', 'avalanche', 'skale-base', 'skale-bite', 'peaq', 'sei'];
   return evmNetworks.includes(network) || network.startsWith('eip155:');
 }
 
