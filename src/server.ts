@@ -22,8 +22,8 @@ export type DynamicPrice = number | ((req: any) => number | Promise<number>);
 export interface ProtectOptions {
   /** Price in USD (e.g., 0.01 for 1 cent) */
   price: DynamicPrice;
-  /** Wallet address to receive payments */
-  payTo: string;
+  /** Wallet address to receive payments, or stripePayTo() for Stripe settlement */
+  payTo: string | StripePayTo;
   /** Description shown to payer */
   description?: string;
   /** MIME type of the response (default: application/json) */
@@ -57,6 +57,119 @@ export interface PaymentInfo {
   payer?: string;
   network: RelaiNetwork;
   amount: number;
+}
+
+// ============================================================================
+// Stripe Pay-To Helper
+// ============================================================================
+
+/** Config returned by stripePayTo() - used by protect() to create Stripe deposit addresses */
+export interface StripePayTo {
+  readonly __brand: 'stripePayTo';
+  readonly secretKey: string;
+  /** Stripe crypto deposits network (default: 'base') */
+  readonly stripeNetwork: string;
+}
+
+/**
+ * Create a Stripe pay-to configuration for x402 payments.
+ * Payments settle as USD in your Stripe Dashboard - no crypto knowledge required.
+ *
+ * Stripe creates a fresh PaymentIntent + deposit address per request.
+ * Network is auto-set to Base (Stripe settles USDC on Base).
+ *
+ * @example
+ * ```typescript
+ * import Relai, { stripePayTo } from '@relai-fi/x402/server';
+ *
+ * const relai = new Relai({ network: 'base' });
+ *
+ * app.get('/api/data', relai.protect({
+ *   price: 0.01,
+ *   payTo: stripePayTo(process.env.STRIPE_SECRET_KEY!),
+ * }), (req, res) => {
+ *   res.json({ data: 'paid content' });
+ * });
+ * ```
+ */
+export function stripePayTo(
+  stripeSecretKey: string,
+  options?: { network?: string },
+): StripePayTo {
+  if (!stripeSecretKey) {
+    throw new Error('stripePayTo requires a Stripe secret key');
+  }
+  return {
+    __brand: 'stripePayTo' as const,
+    secretKey: stripeSecretKey,
+    stripeNetwork: options?.network || 'base',
+  };
+}
+
+/** @internal Type guard for StripePayTo */
+function isStripePayTo(payTo: unknown): payTo is StripePayTo {
+  return (
+    typeof payTo === 'object' &&
+    payTo !== null &&
+    (payTo as any).__brand === 'stripePayTo'
+  );
+}
+
+/**
+ * @internal Create a Stripe PaymentIntent with crypto payment method
+ * and extract the deposit address.
+ */
+async function createStripeDepositAddress(
+  secretKey: string,
+  amountUsdCents: number,
+  network: string = 'base',
+): Promise<string> {
+  const params = new URLSearchParams();
+  params.append('amount', String(amountUsdCents));
+  params.append('currency', 'usd');
+  params.append('payment_method_types[]', 'crypto');
+  params.append('payment_method_data[type]', 'crypto');
+  params.append('confirm', 'true');
+
+  const res = await fetch('https://api.stripe.com/v1/payment_intents', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${secretKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params.toString(),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as any;
+    const msg = err?.error?.message || res.statusText;
+
+    // Provide actionable guidance for common issues
+    if (msg.includes('unknown parameter') || msg.includes('crypto')) {
+      throw new Error(
+        `Stripe crypto payins not enabled on this account. ` +
+        `Enable at: https://support.stripe.com/questions/get-started-with-pay-with-crypto ` +
+        `(Original: ${msg})`,
+      );
+    }
+    throw new Error(`Stripe PaymentIntent creation failed: ${msg}`);
+  }
+
+  const pi = await res.json() as any;
+  const depositDetails = pi.next_action?.crypto_collect_deposit_details;
+  if (!depositDetails) {
+    throw new Error(
+      'Stripe PaymentIntent missing crypto deposit details. ' +
+      'Ensure crypto payins are enabled: https://support.stripe.com/questions/get-started-with-pay-with-crypto',
+    );
+  }
+
+  const address = depositDetails.deposit_addresses?.[network]?.address;
+  if (!address) {
+    throw new Error(`No Stripe deposit address for network: ${network}`);
+  }
+
+  return address;
 }
 
 // ============================================================================
@@ -114,7 +227,11 @@ export class Relai {
           return res.status(400).json({ error: 'Invalid price configuration' });
         }
 
-        const network = options.network || self.network;
+        // Resolve network (Stripe auto-sets to base)
+        const stripeConfig = isStripePayTo(options.payTo) ? options.payTo : null;
+        const network = stripeConfig
+          ? (stripeConfig.stripeNetwork as RelaiNetwork) || 'base'
+          : (options.network || self.network);
         const caip2 = NETWORK_CAIP2[network];
         const asset = USDC_ADDRESSES[network];
         const amount = String(Math.floor(resolvedPrice * 1_000_000)); // USD → USDC atomic units (6 decimals)
@@ -131,6 +248,19 @@ export class Relai {
         if (!paymentHeader) {
           options.onPaymentRequired?.(req, { price: resolvedPrice, network });
 
+          // Resolve payTo address (Stripe creates a fresh deposit address per request)
+          let resolvedPayTo: string;
+          if (stripeConfig) {
+            const amountInCents = Math.max(1, Math.round(resolvedPrice * 100));
+            resolvedPayTo = await createStripeDepositAddress(
+              stripeConfig.secretKey,
+              amountInCents,
+              stripeConfig.stripeNetwork,
+            );
+          } else {
+            resolvedPayTo = options.payTo as string;
+          }
+
           return res.status(402).json({
             x402Version: 2,
             error: 'Payment required',
@@ -144,7 +274,7 @@ export class Relai {
               network: caip2,
               amount,
               asset,
-              payTo: options.payTo,
+              payTo: resolvedPayTo,
               maxTimeoutSeconds: options.maxTimeoutSeconds || 60,
               extra: {
                 name: 'USD Coin',
@@ -175,13 +305,30 @@ export class Relai {
           }
         }
 
+        // Resolve payTo for settle (extract from signed proof when using Stripe)
+        let settlePayTo: string;
+        if (stripeConfig) {
+          settlePayTo =
+            paymentProof.payload?.authorization?.to ||
+            paymentProof.accepted?.payTo ||
+            '';
+          if (!settlePayTo) {
+            return res.status(400).json({
+              x402Version: 2,
+              error: 'Cannot extract destination address from payment proof',
+            });
+          }
+        } else {
+          settlePayTo = options.payTo as string;
+        }
+
         // Build payment requirements for facilitator
         const paymentRequirements = {
           scheme: 'exact',
           network,
           amount,
           asset,
-          payTo: options.payTo,
+          payTo: settlePayTo,
           maxTimeoutSeconds: options.maxTimeoutSeconds || 60,
         };
 

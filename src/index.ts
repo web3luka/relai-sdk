@@ -2,7 +2,8 @@
 
 // Server-side (Express middleware)
 export { default as Relai, Relai as default } from './server';
-export type { RelaiServerConfig, ProtectOptions, SettleResult, PaymentInfo, DynamicPrice } from './server';
+export type { RelaiServerConfig, ProtectOptions, SettleResult, PaymentInfo, DynamicPrice, StripePayTo } from './server';
+export { stripePayTo } from './server';
 
 // Client-side (fetch wrapper)
 export { createX402Client } from './client';

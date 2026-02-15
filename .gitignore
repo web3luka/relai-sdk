@@ -77,3 +77,4 @@ temp/
 **/generated/**
 
 **/deploy.yml
+*.mjs
