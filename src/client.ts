@@ -279,11 +279,14 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     const paymentAmount = accept.amount || accept.maxAmountRequired;
 
     // EIP-3009 transferWithAuthorization typed data
+    // When extra.relayerContract is present (e.g. 0xGasless), sign against the
+    // relayer contract's EIP-712 domain instead of the token contract's domain.
+    const useRelayer = !!extra.relayerContract;
     const domain = {
-      name: extra.name || 'USD Coin',
-      version: extra.version || '2',
+      name: useRelayer ? (extra.domainName || 'A402') : (extra.name || 'USD Coin'),
+      version: useRelayer ? (extra.domainVersion || '1') : (extra.version || '2'),
       chainId,
-      verifyingContract: accept.asset,
+      verifyingContract: useRelayer ? extra.relayerContract : accept.asset,
     };
 
     const validAfter = 0;
@@ -302,7 +305,9 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       ],
     };
 
-    const spender = extra.feePayer || accept.payTo;
+    // For relayer-based facilitators (0xGasless), 'to' is the payTo (merchant).
+    // For standard x402, 'to' is the feePayer/facilitator address.
+    const spender = useRelayer ? accept.payTo : (extra.feePayer || accept.payTo);
 
     const message = {
       from: evmWallet.address,
