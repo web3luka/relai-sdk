@@ -199,10 +199,51 @@ async function createStripeDepositAddress(
 export class Relai {
   private network: RelaiNetwork;
   private facilitatorUrl: string;
+  private feePayerCache: Map<string, string> = new Map(); // Cache feePayer per network
 
   constructor(config: RelaiServerConfig) {
     this.network = config.network;
     this.facilitatorUrl = config.facilitatorUrl || RELAI_FACILITATOR_URL;
+  }
+
+  /**
+   * Get feePayer address for a network (cached)
+   */
+  private async getFeePayer(caip2: string): Promise<string | undefined> {
+    // Check cache first
+    if (this.feePayerCache.has(caip2)) {
+      return this.feePayerCache.get(caip2);
+    }
+
+    // If using RelAI facilitator, use hardcoded address (no fetch needed)
+    const isRelAI = this.facilitatorUrl.includes('facilitator.x402.fi') || 
+                    this.facilitatorUrl.includes('relai');
+    
+    if (isRelAI) {
+      const relaiFeePayer = '0x1892f72fdB3A966b2AD8595aA5f7741Ef72d6085';
+      this.feePayerCache.set(caip2, relaiFeePayer);
+      return relaiFeePayer;
+    }
+
+    // For other facilitators, fetch from /supported
+    try {
+      const supportedUrl = `${this.facilitatorUrl}/supported`;
+      const supportedRes = await fetch(supportedUrl);
+      if (supportedRes.ok) {
+        const supportedData = await supportedRes.json();
+        // Cache all feePayers from supported kinds
+        supportedData.kinds?.forEach((kind: any) => {
+          if (kind.network && kind.extra?.feePayer) {
+            this.feePayerCache.set(kind.network, kind.extra.feePayer);
+          }
+        });
+        return this.feePayerCache.get(caip2);
+      }
+    } catch (err) {
+      // feePayer MUST come from facilitator - cannot use env for security
+      console.error(`[Relai] Failed to fetch feePayer from facilitator: ${err}`);
+    }
+    return undefined;
   }
 
   /**
@@ -261,6 +302,21 @@ export class Relai {
             resolvedPayTo = options.payTo as string;
           }
 
+          // Get facilitator feePayer address (cached)
+          const feePayer = await self.getFeePayer(caip2);
+
+          // Token metadata per network
+          // IMPORTANT: These must match the actual EIP-712 domain on each network
+          const tokenMetadata: Record<string, { name: string; version: string }> = {
+            'eip155:103698795': { name: 'USDC', version: '1' }, // SKALE BITE
+            'eip155:1187947933': { name: 'USD Coin', version: '2' }, // SKALE Base
+            'eip155:8453': { name: 'USD Coin', version: '2' }, // Base
+            'eip155:43114': { name: 'USD Coin', version: '2' }, // Avalanche
+            'eip155:137': { name: 'USD Coin', version: '2' }, // Polygon
+            'eip155:1': { name: 'USD Coin', version: '2' }, // Ethereum
+          };
+          const metadata = tokenMetadata[caip2] || { name: 'USDC', version: '1' };
+
           return res.status(402).json({
             x402Version: 2,
             error: 'Payment required',
@@ -277,9 +333,10 @@ export class Relai {
               payTo: resolvedPayTo,
               maxTimeoutSeconds: options.maxTimeoutSeconds || 60,
               extra: {
-                name: 'USD Coin',
-                version: '2',
+                name: metadata.name,
+                version: metadata.version,
                 decimals: 6,
+                ...(feePayer && { feePayer }), // Add feePayer if available
               },
             }],
           });

@@ -36,6 +36,14 @@ This SDK handles the entire flow automatically — call `fetch()` and payments h
 
 ---
 
+## Examples
+
+See complete working examples in the [`examples/`](./examples) folder:
+
+- **[SKALE BITE Next.js](./examples/skale-bite-nextjs)** - Full-stack app with backend protection and frontend payments
+
+---
+
 ## Quick Start
 
 ### Install
