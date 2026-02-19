@@ -53,7 +53,7 @@ export interface X402Client {
 
 /**
  * Create an x402 client for automatic payment handling.
- * Supports all RelAI facilitator networks: Solana, Base, Avalanche, SKALE Base.
+ * Supports all RelAI facilitator networks: Solana, Base, Avalanche, SKALE Base, SKALE Base Sepolia, SKALE BITE, Polygon, and Ethereum.
  * Auto-detects the correct chain from the 402 response and picks the right
  * signing method (Solana SPL transfer, EVM EIP-3009 transferWithAuthorization).
  *
@@ -75,6 +75,7 @@ const PERMIT_NETWORKS = new Set<string>([]);
 // Default EVM RPC URLs
 const DEFAULT_EVM_RPC_URLS: Record<string, string> = {
   'skale-base': 'https://skale-base.skalenodes.com/v1/base',
+  'skale-base-sepolia': 'https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha',
   'skale-bite': 'https://base-sepolia-testnet.skalenodes.com/v1/bite-v2-sandbox',
   'base': 'https://mainnet.base.org',
   'avalanche': 'https://api.avax.network/ext/bc/C/rpc',
@@ -285,12 +286,29 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     // For standard x402 (RelAI), 'to' is also payTo (merchant).
     const useRelayer = !!extra.relayerContract;
 
+    const rpcUrl = getEvmRpcUrl(network || rawNetwork);
+    const defaultTokenVersion = chainId === CHAIN_IDS['skale-bite'] ? '1' : '2';
+
+    let tokenName = extra.name || 'USD Coin';
+    if (!useRelayer && rpcUrl) {
+      try {
+        // Read token name from contract to avoid EIP-712 domain mismatch across bridged assets.
+        const nameHex = await evmRpcCall(rpcUrl, accept.asset, '0x06fdde03');
+        const offset = parseInt(nameHex.slice(2, 66), 16) * 2;
+        const length = parseInt(nameHex.slice(2 + offset, 2 + offset + 64), 16);
+        const hex = nameHex.slice(2 + offset + 64, 2 + offset + 64 + length * 2);
+        tokenName = decodeURIComponent(hex.replace(/[0-9a-f]{2}/g, '%$&'));
+      } catch {
+        tokenName = extra.name || 'USD Coin';
+      }
+    }
+
     // EIP-3009 transferWithAuthorization typed data
     // When extra.relayerContract is present (e.g. 0xGasless), sign against the
     // relayer contract's EIP-712 domain instead of the token contract's domain.
     const domain = {
-      name: useRelayer ? (extra.domainName || 'A402') : (extra.name || 'USDC'),
-      version: useRelayer ? (extra.domainVersion || '1') : (extra.version || '1'),
+      name: useRelayer ? (extra.domainName || 'A402') : tokenName,
+      version: useRelayer ? (extra.domainVersion || '1') : (extra.version || defaultTokenVersion),
       chainId,
       verifyingContract: useRelayer ? extra.relayerContract : accept.asset,
     };
@@ -437,6 +455,58 @@ export function createX402Client(config: X402ClientConfig): X402Client {
   // -----------------------------------------------------------------------
   // Main fetch
   // -----------------------------------------------------------------------
+  function decodeBase64Json(encoded: string): any | null {
+    try {
+      const normalized = encoded.trim().replace(/-/g, '+').replace(/_/g, '/');
+      const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+      const decoded = typeof Buffer !== 'undefined'
+        ? Buffer.from(padded, 'base64').toString('utf8')
+        : atob(padded);
+      return JSON.parse(decoded);
+    } catch {
+      return null;
+    }
+  }
+
+  function parsePaymentRequiredHeader(response: Response): any | null {
+    const headerValue =
+      response.headers.get('payment-required') ||
+      response.headers.get('PAYMENT-REQUIRED') ||
+      response.headers.get('x-payment-required') ||
+      response.headers.get('X-PAYMENT-REQUIRED');
+
+    if (!headerValue) return null;
+
+    const trimmed = headerValue.trim();
+    if (!trimmed) return null;
+
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return decodeBase64Json(trimmed);
+    }
+  }
+
+  function getAccepts(requirements: any): any[] {
+    if (!requirements || typeof requirements !== 'object') {
+      return [];
+    }
+
+    if (Array.isArray(requirements.accepts)) {
+      return requirements.accepts;
+    }
+
+    if (requirements.paymentRequired && Array.isArray(requirements.paymentRequired.accepts)) {
+      return requirements.paymentRequired.accepts;
+    }
+
+    if (requirements.data && Array.isArray(requirements.data.accepts)) {
+      return requirements.data.accepts;
+    }
+
+    return [];
+  }
+
   async function x402Fetch(
     input: string | URL | Request,
     init?: RequestInit,
@@ -449,14 +519,30 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
     log('Got 402 Payment Required');
 
-    let requirements: any;
+    let requirementsFromBody: any = null;
     try {
-      requirements = await response.clone().json();
-    } catch {
-      throw new Error('[relai-x402] Failed to parse 402 response body');
+      requirementsFromBody = await response.clone().json();
+    } catch {}
+
+    const requirementsFromHeader = parsePaymentRequiredHeader(response);
+
+    let requirements: any = requirementsFromBody;
+    let accepts = getAccepts(requirementsFromBody);
+
+    if (!accepts.length && requirementsFromHeader) {
+      const headerAccepts = getAccepts(requirementsFromHeader);
+
+      if (headerAccepts.length || !requirements || typeof requirements !== 'object') {
+        requirements = requirementsFromHeader;
+        accepts = headerAccepts;
+        log('402 body missing accepts; using PAYMENT-REQUIRED header fallback');
+      }
     }
 
-    const accepts = requirements.accepts || [];
+    if (!requirements || typeof requirements !== 'object') {
+      throw new Error('[relai-x402] Failed to parse 402 response body/header');
+    }
+
     if (!accepts.length) throw new Error('[relai-x402] No payment options in 402 response');
 
     const selected = selectAccept(accepts);

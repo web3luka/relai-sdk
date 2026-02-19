@@ -180,7 +180,7 @@ async function createStripeDepositAddress(
  * Server-side SDK for protecting Express endpoints with x402 micropayments.
  * Settles payments through the RelAI facilitator (zero gas fees for users).
  *
- * Supports: Solana, Base, Avalanche, SKALE Base.
+ * Supports: Solana, Base, Avalanche, SKALE Base, SKALE Base Sepolia, SKALE BITE, Polygon, and Ethereum.
  *
  * @example
  * ```typescript
@@ -309,7 +309,8 @@ export class Relai {
           // IMPORTANT: These must match the actual EIP-712 domain on each network
           const tokenMetadata: Record<string, { name: string; version: string }> = {
             'eip155:103698795': { name: 'USDC', version: '1' }, // SKALE BITE
-            'eip155:1187947933': { name: 'USD Coin', version: '2' }, // SKALE Base
+            'eip155:1187947933': { name: 'Bridged USDC (SKALE Bridge)', version: '2' }, // SKALE Base
+            'eip155:324705682': { name: 'Bridged USDC (SKALE Bridge)', version: '2' }, // SKALE Base Sepolia
             'eip155:8453': { name: 'USD Coin', version: '2' }, // Base
             'eip155:43114': { name: 'USD Coin', version: '2' }, // Avalanche
             'eip155:137': { name: 'USD Coin', version: '2' }, // Polygon

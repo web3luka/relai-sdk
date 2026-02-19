@@ -28,6 +28,7 @@ export const NETWORK_V1_TO_V2: Record<string, string> = {
   'polygon': 'eip155:137',
   'avalanche': 'eip155:43114',
   'skale-base': 'eip155:1187947933',
+  'skale-base-sepolia': 'eip155:324705682',
   'peaq': 'eip155:3338',
   'sei': 'eip155:1329',
 };
@@ -65,6 +66,7 @@ export function networkV2ToV1(caip2Network: string): string {
       '84532': 'base-sepolia',
       '43114': 'avalanche',
       '1187947933': 'skale-base',
+      '324705682': 'skale-base-sepolia',
       '3338': 'peaq',
       '1329': 'sei',
     };
@@ -259,7 +261,7 @@ export function isSolanaNetwork(network: string): boolean {
  * Check if network is EVM-based
  */
 export function isEvmNetwork(network: string): boolean {
-  const evmNetworks = ['base', 'base-sepolia', 'ethereum', 'polygon', 'avalanche', 'skale-base', 'skale-bite', 'peaq', 'sei'];
+  const evmNetworks = ['base', 'base-sepolia', 'ethereum', 'polygon', 'avalanche', 'skale-base', 'skale-base-sepolia', 'skale-bite', 'peaq', 'sei'];
   return evmNetworks.includes(network) || network.startsWith('eip155:');
 }
 

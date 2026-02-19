@@ -12,7 +12,15 @@ export const RELAI_FACILITATOR_URL = 'https://facilitator.x402.fi';
 // ============================================================================
 
 /** All networks supported by RelAI facilitator */
-export type RelaiNetwork = 'solana' | 'base' | 'avalanche' | 'skale-base' | 'skale-bite' | 'polygon' | 'ethereum';
+export type RelaiNetwork =
+  | 'solana'
+  | 'base'
+  | 'avalanche'
+  | 'skale-base'
+  | 'skale-base-sepolia'
+  | 'skale-bite'
+  | 'polygon'
+  | 'ethereum';
 
 /** CAIP-2 network identifiers */
 export const NETWORK_CAIP2: Record<RelaiNetwork, string> = {
@@ -20,6 +28,7 @@ export const NETWORK_CAIP2: Record<RelaiNetwork, string> = {
   'base': 'eip155:8453',
   'avalanche': 'eip155:43114',
   'skale-base': 'eip155:1187947933',
+  'skale-base-sepolia': 'eip155:324705682',
   'skale-bite': 'eip155:103698795',
   'polygon': 'eip155:137',
   'ethereum': 'eip155:1',
@@ -35,6 +44,7 @@ export const CHAIN_IDS: Record<string, number> = {
   'base': 8453,
   'avalanche': 43114,
   'skale-base': 1187947933,
+  'skale-base-sepolia': 324705682,
   'skale-bite': 103698795,
   'polygon': 137,
   'ethereum': 1,
@@ -46,6 +56,7 @@ export const USDC_ADDRESSES: Record<RelaiNetwork, string> = {
   'base': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
   'avalanche': '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E',
   'skale-base': '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20',
+  'skale-base-sepolia': '0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
   'skale-bite': '0xc4083B1E81ceb461Ccef3FDa8A9F24F0d764B6D8',
   'polygon': '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
   'ethereum': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
@@ -57,6 +68,7 @@ export const EXPLORER_TX_URL: Record<RelaiNetwork, (tx: string) => string> = {
   'base': (tx) => `https://basescan.org/tx/${tx}`,
   'avalanche': (tx) => `https://snowtrace.io/tx/${tx}`,
   'skale-base': (tx) => `https://skale-base-explorer.skalenodes.com/tx/${tx}`,
+  'skale-base-sepolia': (tx) => `https://base-sepolia-testnet-explorer.skalenodes.com/tx/${tx}`,
   'skale-bite': (tx) => `https://base-sepolia-testnet.explorer.skalenodes.com/tx/${tx}`,
   'polygon': (tx) => `https://polygonscan.com/tx/${tx}`,
   'ethereum': (tx) => `https://etherscan.io/tx/${tx}`,
@@ -68,6 +80,7 @@ export const NETWORK_LABELS: Record<RelaiNetwork, string> = {
   'base': 'Base',
   'avalanche': 'Avalanche',
   'skale-base': 'SKALE Base',
+  'skale-base-sepolia': 'SKALE Base Sepolia',
   'skale-bite': 'SKALE BITE V2',
   'polygon': 'Polygon',
   'ethereum': 'Ethereum',
@@ -82,7 +95,16 @@ export const USDC_SOLANA = USDC_ADDRESSES['solana'];
 export const USDC_BASE = USDC_ADDRESSES['base'];
 
 /** All supported RelAI networks list */
-export const RELAI_NETWORKS: RelaiNetwork[] = ['solana', 'base', 'avalanche', 'skale-base', 'skale-bite', 'polygon', 'ethereum'];
+export const RELAI_NETWORKS: RelaiNetwork[] = [
+  'solana',
+  'base',
+  'avalanche',
+  'skale-base',
+  'skale-base-sepolia',
+  'skale-bite',
+  'polygon',
+  'ethereum',
+];
 
 /** Check if a network is Solana-based */
 export function isSolana(network: string): boolean {
@@ -91,7 +113,7 @@ export function isSolana(network: string): boolean {
 
 /** Check if a network is EVM-based */
 export function isEvm(network: string): boolean {
-  return ['base', 'avalanche', 'skale-base', 'skale-bite', 'polygon', 'ethereum'].includes(network) || network.startsWith('eip155:');
+  return ['base', 'avalanche', 'skale-base', 'skale-base-sepolia', 'skale-bite', 'polygon', 'ethereum'].includes(network) || network.startsWith('eip155:');
 }
 
 /** Normalize CAIP-2 or simple name to RelaiNetwork */
