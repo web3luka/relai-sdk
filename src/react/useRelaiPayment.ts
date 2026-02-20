@@ -31,7 +31,13 @@
  */
 
 import { useState, useCallback, useMemo } from 'react';
-import { createX402Client, type X402ClientConfig } from '../client';
+import {
+  createX402Client,
+  type X402ClientConfig,
+  type X402FetchInit,
+  type X402RelayWsConfig,
+  type X402IntegritasConfig,
+} from '../client';
 import type { SolanaWallet, EvmWallet, WalletSet } from '../types';
 import {
   EXPLORER_TX_URL,
@@ -54,6 +60,10 @@ export interface ConnectedChains {
 export interface UseRelaiPaymentConfig {
   /** Wallets — pass both Solana + EVM and the hook picks automatically */
   wallets?: WalletSet;
+  /** Optional Relay WebSocket transport for /relay/:apiId endpoints */
+  relayWs?: X402RelayWsConfig;
+  /** Default Integritas behavior for outgoing requests */
+  integritas?: boolean | X402IntegritasConfig;
   /** Preferred network when multiple options available */
   preferredNetwork?: RelaiNetwork;
   /** Custom Solana RPC URL */
@@ -68,7 +78,7 @@ export interface UseRelaiPaymentConfig {
 
 export interface UseRelaiPaymentReturn {
   /** Fetch with automatic x402 payment handling */
-  fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  fetch: (input: string | URL | Request, init?: X402FetchInit) => Promise<Response>;
   /** Payment in progress */
   isLoading: boolean;
   /** Current status */
@@ -110,6 +120,8 @@ function isEvmWalletConnected(wallet?: EvmWallet): boolean {
 export function useRelaiPayment(config: UseRelaiPaymentConfig = {}): UseRelaiPaymentReturn {
   const {
     wallets = {},
+    relayWs,
+    integritas,
     preferredNetwork,
     solanaRpcUrl,
     facilitatorUrl,
@@ -140,6 +152,8 @@ export function useRelaiPayment(config: UseRelaiPaymentConfig = {}): UseRelaiPay
   const client = useMemo(() => {
     const cfg: X402ClientConfig = {
       wallets,
+      relayWs,
+      integritas,
       preferredNetwork,
       maxAmountAtomic,
       verbose,
@@ -147,7 +161,7 @@ export function useRelaiPayment(config: UseRelaiPaymentConfig = {}): UseRelaiPay
     if (solanaRpcUrl) cfg.solanaRpcUrl = solanaRpcUrl;
     if (facilitatorUrl) cfg.facilitatorUrl = facilitatorUrl;
     return createX402Client(cfg);
-  }, [wallets, preferredNetwork, solanaRpcUrl, facilitatorUrl, maxAmountAtomic, verbose]);
+  }, [wallets, relayWs, integritas, preferredNetwork, solanaRpcUrl, facilitatorUrl, maxAmountAtomic, verbose]);
 
   // Reset
   const reset = useCallback(() => {
@@ -161,7 +175,7 @@ export function useRelaiPayment(config: UseRelaiPaymentConfig = {}): UseRelaiPay
   // Main fetch
   const fetchWithPayment = useCallback(async (
     input: string | URL | Request,
-    init?: RequestInit,
+    init?: X402FetchInit,
   ): Promise<Response> => {
     setIsLoading(true);
     setStatus('pending');

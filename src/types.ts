@@ -50,6 +50,130 @@ export const CHAIN_IDS: Record<string, number> = {
   'ethereum': 1,
 };
 
+export interface NetworkToken {
+  address: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  domainVersion?: string;
+  isStableUsd?: boolean;
+}
+
+/** Token metadata per network (default token is always the first entry) */
+export const NETWORK_TOKENS: Partial<Record<RelaiNetwork, NetworkToken[]>> = {
+  'solana': [
+    {
+      address: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+      symbol: 'USDC',
+      name: 'USD Coin',
+      decimals: 6,
+    },
+  ],
+  'base': [
+    {
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      symbol: 'USDC',
+      name: 'USD Coin',
+      decimals: 6,
+      domainVersion: '2',
+      isStableUsd: true,
+    },
+  ],
+  'avalanche': [
+    {
+      address: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E',
+      symbol: 'USDC',
+      name: 'USD Coin',
+      decimals: 6,
+      domainVersion: '2',
+      isStableUsd: true,
+    },
+  ],
+  'skale-base': [
+    {
+      address: '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20',
+      symbol: 'USDC',
+      name: 'Bridged USDC (SKALE Bridge)',
+      decimals: 6,
+      domainVersion: '2',
+      isStableUsd: true,
+    },
+    {
+      address: '0x2bF5bF154b515EaA82C31a65ec11554fF5aF7fCA',
+      symbol: 'USDT',
+      name: 'Bridged USDT (SKALE Bridge)',
+      decimals: 6,
+      domainVersion: '2',
+      isStableUsd: true,
+    },
+    {
+      address: '0x1aeeCFE5454c83B42D8A316246CAc9739E7f690e',
+      symbol: 'WBTC',
+      name: 'Wrapped Bitcoin',
+      decimals: 8,
+      domainVersion: '2',
+      isStableUsd: false,
+    },
+    {
+      address: '0x7bD39ABBd0Dd13103542cAe3276C7fA332bCA486',
+      symbol: 'WETH',
+      name: 'Wrapped Ether',
+      decimals: 18,
+      domainVersion: '2',
+      isStableUsd: false,
+    },
+  ],
+  'skale-base-sepolia': [
+    {
+      address: '0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
+      symbol: 'USDC',
+      name: 'Bridged USDC (SKALE Bridge)',
+      decimals: 6,
+      domainVersion: '2',
+      isStableUsd: true,
+    },
+  ],
+  'skale-bite': [
+    {
+      address: '0xc4083B1E81ceb461Ccef3FDa8A9F24F0d764B6D8',
+      symbol: 'USDC',
+      name: 'USDC',
+      decimals: 6,
+      domainVersion: '1',
+      isStableUsd: true,
+    },
+  ],
+  'polygon': [
+    {
+      address: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+      symbol: 'USDC',
+      name: 'USD Coin',
+      decimals: 6,
+      domainVersion: '2',
+      isStableUsd: true,
+    },
+  ],
+  'ethereum': [
+    {
+      address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      symbol: 'USDC',
+      name: 'USD Coin',
+      decimals: 6,
+      domainVersion: '2',
+      isStableUsd: true,
+    },
+  ],
+};
+
+export function resolveToken(network: RelaiNetwork, asset?: string): NetworkToken | null {
+  const tokens = NETWORK_TOKENS[network];
+  if (!tokens || tokens.length === 0) return null;
+  if (!asset) return tokens[0];
+
+  const normalized = String(asset).toLowerCase();
+  return tokens.find((token) => token.address.toLowerCase() === normalized) || null;
+}
+
 /** USDC contract addresses per network */
 export const USDC_ADDRESSES: Record<RelaiNetwork, string> = {
   'solana': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',

@@ -62,12 +62,86 @@ const client = createX402Client({
     solana: solanaWallet,  // @solana/wallet-adapter compatible
     evm: evmWallet,        // wagmi/viem compatible
   },
+  integritas: {
+    enabled: true,
+    flow: 'single', // or 'dual'
+  },
+  relayWs: {
+    enabled: true,
+    // optional: explicit WS endpoint
+    // wsUrl: 'wss://api.relai.fi/api/ws/relay',
+  },
 });
 
 // 402 responses are handled automatically
 const response = await client.fetch('https://api.example.com/protected');
 const data = await response.json();
 ```
+
+### Integritas (client)
+
+`createX402Client` can set Integritas headers automatically for every request.
+
+```typescript
+const client = createX402Client({
+  wallets: { evm: evmWallet },
+  integritas: {
+    enabled: true,
+    flow: 'single',
+  },
+});
+
+// Sends:
+// X-Integritas: true
+// X-Integritas-Flow: single
+await client.fetch('https://api.relai.fi/relay/<apiId>/v1/chat/completions');
+
+// Per-request override
+await client.fetch('https://api.relai.fi/relay/<apiId>/v1/chat/completions', {
+  method: 'POST',
+  x402: {
+    integritas: { enabled: true, flow: 'dual' },
+  },
+});
+```
+
+### WebSocket relay transport (optional)
+
+If your protected API is behind a relay URL like `https://api.relai.fi/relay/:apiId/...`
+or a whitelabel relay URL like `https://<whitelabel>.x402.fi/...`,
+the SDK can use the Relay WebSocket transport automatically.
+
+```typescript
+const client = createX402Client({
+  wallets: {
+    evm: evmWallet,
+  },
+  relayWs: {
+    enabled: true,
+    preflightTimeoutMs: 5000,
+    paymentTimeoutMs: 10000,
+    fallbackToHttp: true,
+  },
+});
+
+// Pass your standard relay HTTP URL (apiId-based or whitelabel-based).
+// SDK handles WS preflight + paid retry internally.
+await client.fetch('https://api.relai.fi/relay/1769629274857/v1/chat/completions', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ messages: [{ role: 'user', content: 'Hello' }] }),
+});
+
+// Whitelabel relay URL is also supported.
+await client.fetch('https://tgmetrics.x402.fi/projects?page=1', {
+  method: 'GET',
+});
+```
+
+For Node.js runtimes without global `WebSocket`, provide `relayWs.webSocketFactory`.
+
+If the relay returns multiple `accepts` options for one request, the SDK automatically
+falls back to standard HTTP x402 flow for that call.
 
 ### React Hook
 
@@ -177,12 +251,32 @@ Creates a fetch wrapper that automatically handles 402 Payment Required response
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `wallets` | `{ solana?, evm? }` | `{}` | Wallet adapters for each chain |
+| `relayWs` | `X402RelayWsConfig` | `undefined` | Optional WS transport for relay URLs |
+| `integritas` | `boolean \| X402IntegritasConfig` | `undefined` | Automatically set Integritas headers |
 | `facilitatorUrl` | `string` | RelAI facilitator | Custom facilitator endpoint |
 | `preferredNetwork` | `RelaiNetwork` | — | Prefer this network when multiple `accepts` |
 | `solanaRpcUrl` | `string` | `https://api.mainnet-beta.solana.com` | Solana RPC (use Helius/Quicknode for production) |
 | `evmRpcUrls` | `Record<string, string>` | Built-in defaults | RPC URLs per network name |
 | `maxAmountAtomic` | `string` | — | Safety cap on payment amount |
 | `verbose` | `boolean` | `false` | Log payment flow to console |
+
+**`integritas` options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | `boolean` | `true` when object is provided | Adds `X-Integritas: true` |
+| `flow` | `'single' \| 'dual'` | — | Adds `X-Integritas-Flow` |
+
+**`relayWs` options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | `boolean` | `false` | Enable WS transport for relay URLs |
+| `wsUrl` | `string` | derived from relay host | Explicit WebSocket relay endpoint |
+| `preflightTimeoutMs` | `number` | `5000` | Timeout for WS preflight request |
+| `paymentTimeoutMs` | `number` | `10000` | Timeout for paid WS retry |
+| `fallbackToHttp` | `boolean` | `true` | Fall back to standard HTTP flow if WS fails |
+| `webSocketFactory` | `(url) => WebSocketLike` | runtime WebSocket | Custom WS factory for Node.js/server runtimes |
 
 **Wallet interfaces:**
 
@@ -245,6 +339,10 @@ app.get('/api/data', relai.protect({
   payTo: '0xYourWallet',
   price: 0.01,  // $0.01 USDC
   description: 'Premium data access',
+  integritas: {
+    enabled: true,
+    flow: 'single',
+  },
 }), (req, res) => {
   // req.payment = { verified, transactionId, payer, network, amount }
   res.json({ data: 'Protected content', payment: req.payment });
@@ -269,6 +367,12 @@ app.get('/api/solana-data', relai.protect({
 2. Client signs payment (SDK handles this) → retries with `X-PAYMENT` header
 3. Server calls RelAI facilitator `/settle` → gas sponsored by RelAI
 4. Settlement success → `PAYMENT-RESPONSE` header set, `req.payment` populated, `next()` called
+
+**Integritas on server protect:**
+
+- `integritas: true` enables Integritas metadata for the endpoint.
+- `integritas: { enabled: true, flow: 'single' }` sets default flow.
+- Buyer headers (`X-Integritas`, `X-Integritas-Flow`) override defaults per request.
 
 **`req.payment` fields:**
 | Field | Type | Description |

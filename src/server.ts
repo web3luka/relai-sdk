@@ -3,6 +3,8 @@ import {
   NETWORK_CAIP2,
   USDC_ADDRESSES,
   RELAI_FACILITATOR_URL,
+  resolveToken,
+  type NetworkToken,
   type RelaiNetwork,
 } from './types';
 
@@ -19,9 +21,20 @@ export interface RelaiServerConfig {
 
 export type DynamicPrice = number | ((req: any) => number | Promise<number>);
 
+export type RelaiIntegritasFlow = 'single' | 'dual';
+
+export interface RelaiIntegritasOptions {
+  /** Enable Integritas by default for this endpoint */
+  enabled?: boolean;
+  /** Default flow when Integritas is enabled */
+  flow?: RelaiIntegritasFlow;
+}
+
 export interface ProtectOptions {
   /** Price in USD (e.g., 0.01 for 1 cent) */
   price: DynamicPrice;
+  /** Optional token asset address for networks supporting multiple tokens */
+  asset?: string;
   /** Wallet address to receive payments, or stripePayTo() for Stripe settlement */
   payTo: string | StripePayTo;
   /** Description shown to payer */
@@ -30,6 +43,8 @@ export interface ProtectOptions {
   mimeType?: string;
   /** Maximum timeout in seconds (default: 60) */
   maxTimeoutSeconds?: number;
+  /** Integritas options (or simple boolean enable flag) */
+  integritas?: boolean | RelaiIntegritasOptions;
   /** Override network for this endpoint */
   network?: RelaiNetwork;
   /** Custom validation after payment is settled */
@@ -47,6 +62,10 @@ export interface SettleResult {
   transaction?: string;
   payer?: string;
   network?: string;
+  splitTransfers?: Record<string, unknown>;
+  integritasFeePaid?: boolean;
+  provenance?: Record<string, unknown>;
+  integritas?: Record<string, unknown>;
   error?: string;
   errorReason?: string;
 }
@@ -106,6 +125,96 @@ export function stripePayTo(
   };
 }
 
+const USD_PRICE_CACHE_TTL_MS = 60 * 1000;
+const usdPriceCache = new Map<string, { usd: number; expiresAt: number }>();
+
+const COINGECKO_ID_BY_SYMBOL: Record<string, string> = {
+  WETH: 'ethereum',
+  WBTC: 'bitcoin',
+};
+
+function isStableUsdToken(token: NetworkToken): boolean {
+  if (token.isStableUsd === true) return true;
+  const symbol = String(token.symbol || '').toUpperCase();
+  return symbol === 'USDC' || symbol === 'USDT';
+}
+
+async function fetchUsdPriceFromCoinGecko(coinId: string): Promise<number> {
+  const now = Date.now();
+  const cached = usdPriceCache.get(coinId);
+  if (cached && cached.expiresAt > now) {
+    return cached.usd;
+  }
+
+  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(coinId)}&vs_currencies=usd`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`CoinGecko price request failed: HTTP ${res.status}`);
+  }
+
+  const payload = await res.json() as Record<string, { usd?: number }>;
+  const usd = Number(payload?.[coinId]?.usd);
+  if (!Number.isFinite(usd) || usd <= 0) {
+    throw new Error(`CoinGecko returned invalid usd price for ${coinId}`);
+  }
+
+  usdPriceCache.set(coinId, {
+    usd,
+    expiresAt: now + USD_PRICE_CACHE_TTL_MS,
+  });
+
+  return usd;
+}
+
+async function resolveAmountAtomicFromUsd({
+  priceUsd,
+  token,
+  network,
+}: {
+  priceUsd: number;
+  token: NetworkToken;
+  network: RelaiNetwork;
+}): Promise<string> {
+  const decimals = Number(token.decimals);
+  if (!Number.isFinite(decimals) || decimals < 0) {
+    throw new Error(`Invalid token decimals for ${token.symbol || token.address}`);
+  }
+
+  if (isStableUsdToken(token)) {
+    const units = Math.floor(priceUsd * Math.pow(10, decimals));
+    return String(Math.max(1, units));
+  }
+
+  const symbol = String(token.symbol || '').toUpperCase();
+  const coinGeckoId = COINGECKO_ID_BY_SYMBOL[symbol];
+  if (!coinGeckoId) {
+    throw new Error(`No USD quote source configured for token ${symbol || token.address} on ${network}`);
+  }
+
+  const overrideEnv = process.env[`EVM_TOKEN_PRICE_${symbol}_USD`];
+  const usdPerToken =
+    overrideEnv && Number(overrideEnv) > 0
+      ? Number(overrideEnv)
+      : await fetchUsdPriceFromCoinGecko(coinGeckoId);
+
+  const tokenAmount = priceUsd / usdPerToken;
+  const rawUnits = tokenAmount * Math.pow(10, decimals);
+
+  if (!Number.isFinite(rawUnits) || rawUnits <= 0) {
+    throw new Error(
+      `Invalid conversion result for token ${symbol || token.address}: priceUsd=${priceUsd}, usdPerToken=${usdPerToken}`,
+    );
+  }
+
+  return String(Math.max(1, Math.floor(rawUnits)));
+}
+
 /** @internal Type guard for StripePayTo */
 function isStripePayTo(payTo: unknown): payTo is StripePayTo {
   return (
@@ -113,6 +222,43 @@ function isStripePayTo(payTo: unknown): payTo is StripePayTo {
     payTo !== null &&
     (payTo as any).__brand === 'stripePayTo'
   );
+}
+
+function parseBooleanHeader(value: unknown): boolean | null {
+  if (value == null) return null;
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+  return null;
+}
+
+function normalizeIntegritasFlow(value: unknown): RelaiIntegritasFlow | undefined {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'single') return 'single';
+  if (normalized === 'dual') return 'dual';
+  return undefined;
+}
+
+function normalizeIntegritasOptions(
+  value: boolean | RelaiIntegritasOptions | undefined,
+): { enabled: boolean; flow?: RelaiIntegritasFlow } {
+  if (value === true) return { enabled: true };
+  if (value === false || value == null) return { enabled: false };
+
+  const flow = normalizeIntegritasFlow(value.flow);
+  const enabled =
+    typeof value.enabled === 'boolean'
+      ? value.enabled
+      : true;
+
+  return {
+    enabled,
+    ...(flow ? { flow } : {}),
+  };
 }
 
 /**
@@ -274,8 +420,57 @@ export class Relai {
           ? (stripeConfig.stripeNetwork as RelaiNetwork) || 'base'
           : (options.network || self.network);
         const caip2 = NETWORK_CAIP2[network];
-        const asset = USDC_ADDRESSES[network];
-        const amount = String(Math.floor(resolvedPrice * 1_000_000)); // USD → USDC atomic units (6 decimals)
+        const requestedAsset =
+          typeof options.asset === 'string' && options.asset.trim() !== ''
+            ? options.asset.trim()
+            : undefined;
+        const explicitToken = requestedAsset ? resolveToken(network, requestedAsset) : null;
+        if (requestedAsset && !explicitToken) {
+          return res.status(400).json({
+            error: `Unsupported asset ${requestedAsset} for network ${network}`,
+          });
+        }
+
+        const fallbackToken: NetworkToken = {
+          address: USDC_ADDRESSES[network],
+          symbol: 'USDC',
+          name: network === 'skale-bite' ? 'USDC' : 'USD Coin',
+          decimals: 6,
+          domainVersion: network === 'skale-bite' ? '1' : '2',
+          isStableUsd: true,
+        };
+        const token = explicitToken || resolveToken(network) || fallbackToken;
+        const asset = token.address;
+        const tokenName = token.name || 'USD Coin';
+        const tokenVersion = token.domainVersion || (network === 'skale-bite' ? '1' : '2');
+        const tokenDecimals = Number.isFinite(Number(token.decimals)) ? Number(token.decimals) : 6;
+
+        let amount: string;
+        try {
+          amount = await resolveAmountAtomicFromUsd({
+            priceUsd: resolvedPrice,
+            token,
+            network,
+          });
+        } catch (err) {
+          console.error('[Relai] Failed to convert USD amount to token units:', err);
+          return res.status(500).json({
+            error: 'Failed to quote token amount for payment requirements',
+          });
+        }
+
+        const configuredIntegritas = normalizeIntegritasOptions(options.integritas);
+        const headerIntegritasEnabled = parseBooleanHeader(req.headers['x-integritas']);
+        const headerIntegritasFlow = normalizeIntegritasFlow(req.headers['x-integritas-flow']);
+        const integritasEnabled =
+          headerIntegritasEnabled === null
+            ? configuredIntegritas.enabled
+            : headerIntegritasEnabled;
+        const integritasFlow = headerIntegritasFlow || configuredIntegritas.flow;
+        const integritasMode =
+          integritasFlow === 'single'
+            ? 'single_signature_fee_included'
+            : (integritasFlow === 'dual' ? 'dual_signature_split' : undefined);
 
         // Check for payment header (base64-encoded JSON)
         const paymentHeader =
@@ -305,19 +500,6 @@ export class Relai {
           // Get facilitator feePayer address (cached)
           const feePayer = await self.getFeePayer(caip2);
 
-          // Token metadata per network
-          // IMPORTANT: These must match the actual EIP-712 domain on each network
-          const tokenMetadata: Record<string, { name: string; version: string }> = {
-            'eip155:103698795': { name: 'USDC', version: '1' }, // SKALE BITE
-            'eip155:1187947933': { name: 'Bridged USDC (SKALE Bridge)', version: '2' }, // SKALE Base
-            'eip155:324705682': { name: 'Bridged USDC (SKALE Bridge)', version: '2' }, // SKALE Base Sepolia
-            'eip155:8453': { name: 'USD Coin', version: '2' }, // Base
-            'eip155:43114': { name: 'USD Coin', version: '2' }, // Avalanche
-            'eip155:137': { name: 'USD Coin', version: '2' }, // Polygon
-            'eip155:1': { name: 'USD Coin', version: '2' }, // Ethereum
-          };
-          const metadata = tokenMetadata[caip2] || { name: 'USDC', version: '1' };
-
           return res.status(402).json({
             x402Version: 2,
             error: 'Payment required',
@@ -334,12 +516,29 @@ export class Relai {
               payTo: resolvedPayTo,
               maxTimeoutSeconds: options.maxTimeoutSeconds || 60,
               extra: {
-                name: metadata.name,
-                version: metadata.version,
-                decimals: 6,
+                name: tokenName,
+                version: tokenVersion,
+                decimals: tokenDecimals,
+                symbol: token.symbol,
                 ...(feePayer && { feePayer }), // Add feePayer if available
+                ...(integritasEnabled ? { integritasEnabled: true } : {}),
+                ...(integritasFlow ? { integritasFlow } : {}),
+                ...(integritasMode ? { integritasMode } : {}),
+                ...(integritasFlow === 'single' ? { integritasSingleSignature: true } : {}),
               },
             }],
+            ...((configuredIntegritas.enabled || integritasEnabled || !!integritasFlow)
+              ? {
+                  extensions: {
+                    integritas: {
+                      available: true,
+                      selectedFlow: integritasFlow || null,
+                      availableFlows: ['single', 'dual'],
+                      enabled: integritasEnabled,
+                    },
+                  },
+                }
+              : {}),
           });
         }
 
@@ -388,6 +587,16 @@ export class Relai {
           asset,
           payTo: settlePayTo,
           maxTimeoutSeconds: options.maxTimeoutSeconds || 60,
+          ...(integritasEnabled
+            ? {
+                extra: {
+                  integritasEnabled: true,
+                  ...(integritasFlow ? { integritasFlow } : {}),
+                  ...(integritasMode ? { integritasMode } : {}),
+                  ...(integritasFlow === 'single' ? { integritasSingleSignature: true } : {}),
+                },
+              }
+            : {}),
         };
 
         // Call facilitator /settle

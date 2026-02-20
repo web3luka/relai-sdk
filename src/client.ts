@@ -34,6 +34,8 @@ export interface X402ClientConfig {
   wallet?: SolanaWallet;
   /** Custom facilitator URL, default: RelAI facilitator */
   facilitatorUrl?: string;
+  /** Optional Relay WebSocket transport for /relay/:apiId endpoints */
+  relayWs?: X402RelayWsConfig;
   /** Preferred network when multiple options available */
   preferredNetwork?: RelaiNetwork;
   /** Custom Solana RPC URL */
@@ -42,13 +44,93 @@ export interface X402ClientConfig {
   evmRpcUrls?: Record<string, string>;
   /** Maximum payment amount in atomic units */
   maxAmountAtomic?: string;
+  /** Default Integritas behavior for outgoing requests */
+  integritas?: boolean | X402IntegritasConfig;
   /** Enable verbose logging */
   verbose?: boolean;
 }
 
+export type X402IntegritasFlow = 'single' | 'dual';
+
+export interface X402IntegritasConfig {
+  /** Enable Integritas stamp request headers */
+  enabled?: boolean;
+  /** Preferred Integritas flow for the request */
+  flow?: X402IntegritasFlow;
+}
+
+export interface X402RequestOptions {
+  /** Per-request Integritas override */
+  integritas?: boolean | X402IntegritasConfig;
+}
+
+export type X402FetchInit = RequestInit & {
+  /** SDK-specific per-request options (not forwarded to fetch as-is) */
+  x402?: X402RequestOptions;
+};
+
+export interface RelayWebSocketLike {
+  readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  addEventListener?: (type: string, listener: (...args: any[]) => void) => void;
+  removeEventListener?: (type: string, listener: (...args: any[]) => void) => void;
+  on?: (type: string, listener: (...args: any[]) => void) => void;
+  off?: (type: string, listener: (...args: any[]) => void) => void;
+  removeListener?: (type: string, listener: (...args: any[]) => void) => void;
+  onopen?: ((event: unknown) => void) | null;
+  onmessage?: ((event: unknown) => void) | null;
+  onerror?: ((event: unknown) => void) | null;
+  onclose?: ((event: unknown) => void) | null;
+}
+
+export type RelayWebSocketFactory = (url: string) => RelayWebSocketLike;
+
+export interface X402RelayWsConfig {
+  /** Enable WebSocket transport for relay URLs (still falls back to HTTP by default). */
+  enabled?: boolean;
+  /** Explicit WebSocket relay URL (default is derived from relay URL host). */
+  wsUrl?: string;
+  /** Timeout for WS connect and preflight call in milliseconds. Default: 5000. */
+  preflightTimeoutMs?: number;
+  /** Timeout for paid WS retry in milliseconds. Default: 10000. */
+  paymentTimeoutMs?: number;
+  /** Fallback to standard HTTP x402 flow when WS transport fails. Default: true. */
+  fallbackToHttp?: boolean;
+  /** Custom WebSocket factory, useful in runtimes without global WebSocket. */
+  webSocketFactory?: RelayWebSocketFactory;
+}
+
+export interface X402RelayWsError {
+  code: number;
+  message: string;
+  data?: unknown;
+  paymentRequired?: unknown;
+}
+
+export interface X402RelayWsResponse {
+  id?: string | number;
+  result?: unknown;
+  error?: X402RelayWsError;
+  paymentResponse?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
 export interface X402Client {
   /** Fetch with automatic x402 payment handling */
-  fetch(input: string | URL | Request, init?: RequestInit): Promise<Response>;
+  fetch(input: string | URL | Request, init?: X402FetchInit): Promise<Response>;
+}
+
+type RelaySocketEventName = 'open' | 'message' | 'error' | 'close';
+type RelaySocketListener = (...args: any[]) => void;
+
+interface RelayWsCallRequest {
+  relayUrl: string;
+  requestMethod: string;
+  requestHeaders: Record<string, string>;
+  requestBody?: unknown;
+  paymentPayload?: unknown;
+  timeoutMs: number;
 }
 
 /**
@@ -88,12 +170,33 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     wallets = {},
     wallet: legacyWallet,
     facilitatorUrl = RELAI_FACILITATOR_URL,
+    relayWs,
     preferredNetwork,
     solanaRpcUrl = 'https://api.mainnet-beta.solana.com',
     evmRpcUrls = {},
     maxAmountAtomic,
+    integritas,
     verbose = false,
   } = config;
+
+  const relayWsEnabled = relayWs?.enabled === true;
+  const relayWsPreflightTimeoutMs = relayWs?.preflightTimeoutMs ?? 5000;
+  const relayWsPaymentTimeoutMs = relayWs?.paymentTimeoutMs ?? 10000;
+  const relayWsFallbackToHttp = relayWs?.fallbackToHttp ?? true;
+  const defaultIntegritas = normalizeIntegritasOptions(integritas);
+  const relayWsReservedSubdomains = new Set<string>([
+    'www',
+    'api',
+    'localhost',
+    'admin',
+    'app',
+    'dashboard',
+    'docs',
+    'documentation',
+    'status',
+    'blog',
+    'facilitator',
+  ]);
 
   const log = verbose ? console.log.bind(console, '[relai-x402]') : () => {};
 
@@ -107,6 +210,533 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     effectiveWallets.solana?.publicKey && effectiveWallets.solana?.signTransaction
   );
   if (hasSolanaWallet) log('Solana wallet ready');
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+  }
+
+  function parseJsonSafe(value: string): unknown {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  function addSocketListener(
+    socket: RelayWebSocketLike,
+    eventName: RelaySocketEventName,
+    listener: RelaySocketListener,
+  ): void {
+    if (socket.addEventListener) {
+      socket.addEventListener(eventName, listener);
+      return;
+    }
+
+    if (socket.on) {
+      socket.on(eventName, listener);
+    }
+  }
+
+  function removeSocketListener(
+    socket: RelayWebSocketLike,
+    eventName: RelaySocketEventName,
+    listener: RelaySocketListener,
+  ): void {
+    if (socket.removeEventListener) {
+      socket.removeEventListener(eventName, listener);
+      return;
+    }
+
+    if (socket.off) {
+      socket.off(eventName, listener);
+      return;
+    }
+
+    if (socket.removeListener) {
+      socket.removeListener(eventName, listener);
+    }
+  }
+
+  function resolveRelayWsUrl(relayUrl: string): string {
+    if (relayWs?.wsUrl && relayWs.wsUrl.trim() !== '') {
+      return relayWs.wsUrl.trim();
+    }
+
+    const parsedRelayUrl = new URL(relayUrl);
+    const wsProtocol = parsedRelayUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${parsedRelayUrl.host}/api/ws/relay`;
+  }
+
+  function resolveRelayWhitelabel(parsedRelayUrl: URL): string | null {
+    const hostParts = parsedRelayUrl.hostname.toLowerCase().split('.').filter(Boolean);
+    if (hostParts.length < 2) {
+      return null;
+    }
+
+    const candidate = decodeURIComponent(hostParts[0] || '').trim();
+    if (!candidate) {
+      return null;
+    }
+
+    if (relayWsReservedSubdomains.has(candidate.toLowerCase())) {
+      return null;
+    }
+
+    const lastPart = hostParts[hostParts.length - 1];
+    const secondLastPart = hostParts[hostParts.length - 2];
+    const isX402WhitelabelHost = hostParts.length >= 3 && secondLastPart === 'x402' && lastPart === 'fi';
+    const isLocalWhitelabelHost = hostParts.length === 2 && lastPart === 'localhost';
+
+    if (!isX402WhitelabelHost && !isLocalWhitelabelHost) {
+      return null;
+    }
+
+    return candidate;
+  }
+
+  function resolveRelayTarget(relayUrl: string): { apiId: string; path: string } {
+    const parsedRelayUrl = new URL(relayUrl);
+    const match = parsedRelayUrl.pathname.match(/\/relay\/([^/]+)(\/.*)?$/);
+    if (match) {
+      const apiId = decodeURIComponent(match[1]);
+      const pathPart = match[2] || '/';
+      return {
+        apiId,
+        path: `${pathPart}${parsedRelayUrl.search || ''}`,
+      };
+    }
+
+    const whitelabel = resolveRelayWhitelabel(parsedRelayUrl);
+    if (!whitelabel) {
+      throw new Error(
+        `[relai-x402] Unsupported relay URL format for WS transport: ${relayUrl}. ` +
+        'Expected /relay/:apiId/... or <whitelabel>.x402.fi/...',
+      );
+    }
+
+    const pathPart = parsedRelayUrl.pathname && parsedRelayUrl.pathname !== ''
+      ? parsedRelayUrl.pathname
+      : '/';
+    return {
+      apiId: whitelabel,
+      path: `${pathPart}${parsedRelayUrl.search || ''}`,
+    };
+  }
+
+  function isRelayRequestUrl(requestUrl: string): boolean {
+    try {
+      resolveRelayTarget(requestUrl);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function headersToRecord(headersInit?: HeadersInit): Record<string, string> {
+    if (!headersInit) return {};
+
+    const output: Record<string, string> = {};
+
+    if (typeof Headers !== 'undefined' && headersInit instanceof Headers) {
+      headersInit.forEach((value, key) => {
+        output[key] = value;
+      });
+      return output;
+    }
+
+    if (Array.isArray(headersInit)) {
+      for (const [key, value] of headersInit) {
+        output[key] = value;
+      }
+      return output;
+    }
+
+    for (const [key, value] of Object.entries(headersInit)) {
+      if (typeof value === 'string') {
+        output[key] = value;
+      } else if (Array.isArray(value)) {
+        output[key] = value.join(', ');
+      } else if (value !== undefined && value !== null) {
+        output[key] = String(value);
+      }
+    }
+
+    return output;
+  }
+
+  function hasHeaderCaseInsensitive(headers: Record<string, string>, headerName: string): boolean {
+    const normalized = headerName.toLowerCase();
+    return Object.keys(headers).some((key) => key.toLowerCase() === normalized);
+  }
+
+  function normalizeIntegritasFlow(value: unknown): X402IntegritasFlow | undefined {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'single') return 'single';
+    if (normalized === 'dual') return 'dual';
+    return undefined;
+  }
+
+  function normalizeIntegritasOptions(
+    value: boolean | X402IntegritasConfig | undefined,
+  ): { enabled: boolean; flow?: X402IntegritasFlow } {
+    if (value === true) return { enabled: true };
+    if (value === false || value == null) return { enabled: false };
+
+    const flow = normalizeIntegritasFlow(value.flow);
+    const enabled =
+      typeof value.enabled === 'boolean'
+        ? value.enabled
+        : true;
+
+    return {
+      enabled,
+      ...(flow ? { flow } : {}),
+    };
+  }
+
+  function resolveIntegritasOptions(
+    override: boolean | X402IntegritasConfig | undefined,
+  ): { enabled: boolean; flow?: X402IntegritasFlow } {
+    if (override === undefined) {
+      return defaultIntegritas;
+    }
+
+    if (typeof override === 'boolean') {
+      return {
+        enabled: override,
+        ...(override && defaultIntegritas.flow ? { flow: defaultIntegritas.flow } : {}),
+      };
+    }
+
+    const flow = normalizeIntegritasFlow(override.flow) || defaultIntegritas.flow;
+    const enabled =
+      typeof override.enabled === 'boolean'
+        ? override.enabled
+        : defaultIntegritas.enabled;
+
+    return {
+      enabled,
+      ...(enabled && flow ? { flow } : {}),
+    };
+  }
+
+  function stripInternalInit(init?: X402FetchInit): RequestInit | undefined {
+    if (!init) return undefined;
+    const { x402: _x402, ...requestInit } = init;
+    return requestInit;
+  }
+
+  function applyIntegritasHeaders(
+    headers: Record<string, string>,
+    options: { enabled: boolean; flow?: X402IntegritasFlow },
+  ): Record<string, string> {
+    if (!options.enabled) return headers;
+
+    if (!hasHeaderCaseInsensitive(headers, 'x-integritas')) {
+      headers['X-Integritas'] = 'true';
+    }
+
+    if (options.flow && !hasHeaderCaseInsensitive(headers, 'x-integritas-flow')) {
+      headers['X-Integritas-Flow'] = options.flow;
+    }
+
+    return headers;
+  }
+
+  function getRequestMethod(input: string | URL | Request, init?: RequestInit): string {
+    const inputMethod = input instanceof Request ? input.method : undefined;
+    return (init?.method || inputMethod || 'GET').toUpperCase();
+  }
+
+  async function bodyInitToWsPayload(bodyInit: unknown): Promise<unknown> {
+    if (bodyInit === undefined || bodyInit === null) {
+      return undefined;
+    }
+
+    if (typeof bodyInit === 'string') {
+      const parsed = parseJsonSafe(bodyInit);
+      return parsed === null ? bodyInit : parsed;
+    }
+
+    if (typeof URLSearchParams !== 'undefined' && bodyInit instanceof URLSearchParams) {
+      return bodyInit.toString();
+    }
+
+    if (typeof FormData !== 'undefined' && bodyInit instanceof FormData) {
+      const entries: Record<string, string> = {};
+      for (const [key, value] of bodyInit.entries()) {
+        entries[key] = typeof value === 'string' ? value : value.name;
+      }
+      return entries;
+    }
+
+    if (typeof Blob !== 'undefined' && bodyInit instanceof Blob) {
+      const text = await bodyInit.text();
+      if (!text) return undefined;
+      const parsed = parseJsonSafe(text);
+      return parsed === null ? text : parsed;
+    }
+
+    if (bodyInit instanceof ArrayBuffer) {
+      return Array.from(new Uint8Array(bodyInit));
+    }
+
+    if (ArrayBuffer.isView(bodyInit)) {
+      return Array.from(new Uint8Array(bodyInit.buffer, bodyInit.byteOffset, bodyInit.byteLength));
+    }
+
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(bodyInit)) {
+      return Array.from(bodyInit.values());
+    }
+
+    if (isRecord(bodyInit)) {
+      return bodyInit;
+    }
+
+    return String(bodyInit);
+  }
+
+  async function resolveRequestBody(input: string | URL | Request, init?: RequestInit): Promise<unknown> {
+    if (init && Object.prototype.hasOwnProperty.call(init, 'body')) {
+      return bodyInitToWsPayload(init.body as unknown);
+    }
+
+    if (input instanceof Request) {
+      const method = getRequestMethod(input, init);
+      if (method === 'GET' || method === 'HEAD') {
+        return undefined;
+      }
+
+      try {
+        const cloned = input.clone();
+        const text = await cloned.text();
+        if (!text) return undefined;
+        const parsed = parseJsonSafe(text);
+        return parsed === null ? text : parsed;
+      } catch {
+        return undefined;
+      }
+    }
+
+    return undefined;
+  }
+
+  function getRequestHeaders(input: string | URL | Request, init?: RequestInit): Record<string, string> {
+    const fromInput = input instanceof Request ? headersToRecord(input.headers) : {};
+    const fromInit = headersToRecord(init?.headers);
+    const merged = {
+      ...fromInput,
+      ...fromInit,
+    };
+
+    if (!merged.Accept && !merged.accept) {
+      merged.Accept = 'application/json';
+    }
+
+    return merged;
+  }
+
+  function toMessageString(data: unknown): string {
+    if (typeof data === 'string') {
+      return data;
+    }
+
+    if (isRecord(data) && typeof data.data !== 'undefined') {
+      return toMessageString(data.data);
+    }
+
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(data)) {
+      return data.toString('utf8');
+    }
+
+    if (data instanceof ArrayBuffer) {
+      const bytes = new Uint8Array(data);
+      if (typeof Buffer !== 'undefined') {
+        return Buffer.from(bytes).toString('utf8');
+      }
+      if (typeof TextDecoder !== 'undefined') {
+        return new TextDecoder().decode(bytes);
+      }
+      throw new Error('Unsupported WebSocket message data type');
+    }
+
+    if (ArrayBuffer.isView(data)) {
+      const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      if (typeof Buffer !== 'undefined') {
+        return Buffer.from(bytes).toString('utf8');
+      }
+      if (typeof TextDecoder !== 'undefined') {
+        return new TextDecoder().decode(bytes);
+      }
+      throw new Error('Unsupported WebSocket message data type');
+    }
+
+    throw new Error('Unsupported WebSocket message data type');
+  }
+
+  function getWebSocketFactory(): RelayWebSocketFactory {
+    if (relayWs?.webSocketFactory) {
+      return relayWs.webSocketFactory;
+    }
+
+    if (typeof WebSocket !== 'undefined') {
+      return (wsUrl: string) => new WebSocket(wsUrl) as unknown as RelayWebSocketLike;
+    }
+
+    throw new Error(
+      '[relai-x402] WebSocket is not available in this runtime. Provide relayWs.webSocketFactory.',
+    );
+  }
+
+  async function relayCallOverWebSocket(request: RelayWsCallRequest): Promise<X402RelayWsResponse> {
+    const wsFactory = getWebSocketFactory();
+    const wsUrl = resolveRelayWsUrl(request.relayUrl);
+    const target = resolveRelayTarget(request.relayUrl);
+    const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const socket = wsFactory(wsUrl);
+
+    return new Promise<X402RelayWsResponse>((resolve, reject) => {
+      let settled = false;
+
+      const settleResolve = (value: X402RelayWsResponse) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        try {
+          socket.close();
+        } catch {
+          // Ignore close errors.
+        }
+        resolve(value);
+      };
+
+      const settleReject = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        try {
+          socket.close();
+        } catch {
+          // Ignore close errors.
+        }
+        reject(error);
+      };
+
+      const timeoutId = setTimeout(() => {
+        settleReject(new Error(`[relai-x402] Timed out waiting for WS relay response after ${request.timeoutMs}ms`));
+      }, request.timeoutMs);
+
+      const cleanup = () => {
+        clearTimeout(timeoutId);
+        removeSocketListener(socket, 'open', onOpen);
+        removeSocketListener(socket, 'message', onMessage);
+        removeSocketListener(socket, 'error', onError);
+        removeSocketListener(socket, 'close', onClose);
+      };
+
+      const onOpen = () => {
+        const envelope: Record<string, unknown> = {
+          id: requestId,
+          method: 'relay.call',
+          params: {
+            apiId: target.apiId,
+            path: target.path,
+            requestMethod: request.requestMethod,
+            requestHeaders: request.requestHeaders,
+            ...(request.requestBody !== undefined ? { requestBody: request.requestBody } : {}),
+          },
+        };
+
+        if (request.paymentPayload !== undefined) {
+          envelope.payment = request.paymentPayload;
+        }
+
+        try {
+          socket.send(JSON.stringify(envelope));
+        } catch {
+          settleReject(new Error('[relai-x402] Failed to send WS relay request'));
+        }
+      };
+
+      const onMessage = (...args: any[]) => {
+        const payload = args.length > 0 ? args[0] : undefined;
+
+        let parsed: unknown;
+        try {
+          parsed = parseJsonSafe(toMessageString(payload));
+        } catch {
+          return;
+        }
+
+        if (!isRecord(parsed)) return;
+
+        const responseId =
+          typeof parsed.id === 'string' || typeof parsed.id === 'number' ? String(parsed.id) : '';
+        if (responseId !== requestId) return;
+
+        settleResolve(parsed as X402RelayWsResponse);
+      };
+
+      const onError = () => {
+        settleReject(new Error('[relai-x402] WebSocket relay transport error'));
+      };
+
+      const onClose = () => {
+        settleReject(new Error('[relai-x402] WebSocket relay connection closed before response'));
+      };
+
+      addSocketListener(socket, 'open', onOpen);
+      addSocketListener(socket, 'message', onMessage);
+      addSocketListener(socket, 'error', onError);
+      addSocketListener(socket, 'close', onClose);
+    });
+  }
+
+  function extractPaymentRequirementsFromWsError(error: X402RelayWsError): any | null {
+    const candidates: unknown[] = [error.paymentRequired, error.data];
+
+    for (const candidate of candidates) {
+      if (!isRecord(candidate)) continue;
+
+      if (Array.isArray(candidate.accepts)) {
+        return candidate;
+      }
+
+      if (isRecord(candidate.paymentRequired) && Array.isArray(candidate.paymentRequired.accepts)) {
+        return candidate.paymentRequired;
+      }
+
+      if (isRecord(candidate.data) && Array.isArray(candidate.data.accepts)) {
+        return candidate.data;
+      }
+    }
+
+    return null;
+  }
+
+  function buildWsResponse(wsResponse: X402RelayWsResponse): Response {
+    const statusFromMetadata =
+      isRecord(wsResponse.metadata) && typeof wsResponse.metadata.status === 'number'
+        ? wsResponse.metadata.status
+        : 200;
+    const status = Number.isInteger(statusFromMetadata) && statusFromMetadata >= 100 && statusFromMetadata <= 599
+      ? statusFromMetadata
+      : 200;
+
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+
+    if (wsResponse.paymentResponse !== undefined) {
+      headers.set('PAYMENT-RESPONSE', encodeBase64Json(wsResponse.paymentResponse));
+    }
+
+    const bodyPayload = wsResponse.result === undefined ? null : wsResponse.result;
+    return new Response(JSON.stringify(bodyPayload), {
+      status,
+      headers,
+    });
+  }
 
   // -----------------------------------------------------------------------
   // Select a payment option from the 402 response's `accepts` array
@@ -259,7 +889,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       },
     };
 
-    return btoa(JSON.stringify(paymentPayload));
+    return encodeBase64Json(paymentPayload);
   }
 
   // -----------------------------------------------------------------------
@@ -359,7 +989,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       facilitatorUrl,
     };
 
-    return btoa(JSON.stringify(paymentPayload));
+    return encodeBase64Json(paymentPayload);
   }
 
   // -----------------------------------------------------------------------
@@ -449,12 +1079,23 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       },
     };
 
-    return btoa(JSON.stringify(paymentPayload));
+    return encodeBase64Json(paymentPayload);
   }
 
   // -----------------------------------------------------------------------
   // Main fetch
   // -----------------------------------------------------------------------
+  function encodeBase64Json(payload: unknown): string {
+    const serialized = JSON.stringify(payload);
+    if (typeof Buffer !== 'undefined') {
+      return Buffer.from(serialized, 'utf8').toString('base64');
+    }
+    if (typeof btoa !== 'undefined') {
+      return btoa(serialized);
+    }
+    throw new Error('[relai-x402] Base64 encoding is not available in this runtime');
+  }
+
   function decodeBase64Json(encoded: string): any | null {
     try {
       const normalized = encoded.trim().replace(/-/g, '+').replace(/_/g, '/');
@@ -509,12 +1150,130 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
   async function x402Fetch(
     input: string | URL | Request,
-    init?: RequestInit,
+    init?: X402FetchInit,
   ): Promise<Response> {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     log('Request:', url);
 
-    const response = await fetch(input, init);
+    const requestInit = stripInternalInit(init);
+    const integritasOptions = resolveIntegritasOptions(init?.x402?.integritas);
+    const requestMethod = getRequestMethod(input, requestInit);
+    const requestHeaders = applyIntegritasHeaders(
+      getRequestHeaders(input, requestInit),
+      integritasOptions,
+    );
+    const requestInitWithHeaders: RequestInit = {
+      ...(requestInit || {}),
+      headers: requestHeaders,
+    };
+    const requestBody = await resolveRequestBody(input, requestInitWithHeaders);
+
+    if (relayWsEnabled && isRelayRequestUrl(url)) {
+      let wsPaymentPhaseStarted = false;
+      try {
+        log('Using WebSocket relay transport');
+
+        const wsPreflightResponse = await relayCallOverWebSocket({
+          relayUrl: url,
+          requestMethod,
+          requestHeaders,
+          requestBody,
+          timeoutMs: relayWsPreflightTimeoutMs,
+        });
+
+        if (!wsPreflightResponse.error) {
+          return buildWsResponse(wsPreflightResponse);
+        }
+
+        if (Number(wsPreflightResponse.error.code) !== 402) {
+          throw new Error(wsPreflightResponse.error.message || '[relai-x402] WebSocket relay request failed');
+        }
+
+        const wsRequirements = extractPaymentRequirementsFromWsError(wsPreflightResponse.error);
+        if (!wsRequirements) {
+          throw new Error(
+            wsPreflightResponse.error.message || '[relai-x402] No payment requirements in WS 402 response'
+          );
+        }
+
+        const wsAccepts = getAccepts(wsRequirements);
+        if (!wsAccepts.length) {
+          throw new Error('[relai-x402] No payment options in WS 402 response');
+        }
+
+        if (wsAccepts.length > 1) {
+          throw new Error(
+            '[relai-x402] WS relay currently supports a single payment payload; use HTTP flow for multi-accept payments'
+          );
+        }
+
+        const wsSelected = selectAccept(wsAccepts);
+        if (!wsSelected) {
+          const networks = wsAccepts.map((a: any) => a.network).join(', ');
+          throw new Error(`[relai-x402] No wallet available for WS networks: ${networks}`);
+        }
+
+        const { accept, chain } = wsSelected;
+        const amount = accept.amount || accept.maxAmountRequired;
+
+        if (maxAmountAtomic && BigInt(amount) > BigInt(maxAmountAtomic)) {
+          throw new Error(`[relai-x402] Amount ${amount} exceeds max ${maxAmountAtomic}`);
+        }
+
+        wsPaymentPhaseStarted = true;
+
+        let paymentHeader: string | null = null;
+        if (chain === 'solana' && hasSolanaWallet) {
+          paymentHeader = await buildSolanaPayment(accept, wsRequirements, url);
+        } else if (chain === 'evm') {
+          const evmNetwork = normalizeNetwork(accept.network || '');
+          const usePermit = evmNetwork && PERMIT_NETWORKS.has(evmNetwork);
+          paymentHeader = usePermit
+            ? await buildEvmPermitPayment(accept, wsRequirements, url)
+            : await buildEvmPayment(accept, wsRequirements, url);
+        }
+
+        if (!paymentHeader) {
+          throw new Error('[relai-x402] Unexpected state - no WS payment handler matched');
+        }
+
+        const paymentPayload = decodeBase64Json(paymentHeader);
+        if (!paymentPayload) {
+          throw new Error('[relai-x402] Failed to decode payment payload for WS relay call');
+        }
+
+        const wsPaidResponse = await relayCallOverWebSocket({
+          relayUrl: url,
+          requestMethod,
+          requestHeaders,
+          requestBody,
+          paymentPayload,
+          timeoutMs: relayWsPaymentTimeoutMs,
+        });
+
+        if (wsPaidResponse.error) {
+          throw new Error(wsPaidResponse.error.message || '[relai-x402] WebSocket paid relay request failed');
+        }
+
+        return buildWsResponse(wsPaidResponse);
+      } catch (wsError) {
+        const wsMessage = wsError instanceof Error ? wsError.message : String(wsError);
+        log('WebSocket relay transport failed:', wsMessage);
+
+        if (wsPaymentPhaseStarted) {
+          // Do not retry over HTTP after payment flow has started (may trigger duplicate signing/payment prompts).
+          throw wsError instanceof Error ? wsError : new Error(`[relai-x402] ${wsMessage}`);
+        }
+
+        if (!relayWsFallbackToHttp) {
+          throw wsError instanceof Error ? wsError : new Error(`[relai-x402] ${wsMessage}`);
+        }
+
+        log('Falling back to HTTP x402 flow');
+      }
+    }
+
+    const response = await fetch(input, requestInitWithHeaders);
     if (response.status !== 402) return response;
 
     log('Got 402 Payment Required');
@@ -565,9 +1324,9 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       const paymentHeader = await buildSolanaPayment(accept, requirements, url);
       log('Retrying with X-PAYMENT header (Solana)');
       return fetch(input, {
-        ...init,
+        ...requestInitWithHeaders,
         headers: {
-          ...(init?.headers || {}),
+          ...requestHeaders,
           'X-PAYMENT': paymentHeader,
         },
       });
@@ -582,15 +1341,15 @@ export function createX402Client(config: X402ClientConfig): X402Client {
         : await buildEvmPayment(accept, requirements, url);
       log('Retrying with X-PAYMENT header');
       return fetch(input, {
-        ...init,
+        ...requestInitWithHeaders,
         headers: {
-          ...(init?.headers || {}),
+          ...requestHeaders,
           'X-PAYMENT': paymentHeader,
         },
       });
     }
 
-    throw new Error('[relai-x402] Unexpected state — no payment handler matched');
+    throw new Error('[relai-x402] Unexpected state - no payment handler matched');
   }
 
   return { fetch: x402Fetch };
