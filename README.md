@@ -200,7 +200,12 @@ function PayButton() {
 | **Polygon** | `polygon` | `eip155:137` | EIP-3009 transferWithAuthorization | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` |
 | **Ethereum** | `ethereum` | `eip155:1` | EIP-3009 transferWithAuthorization | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` |
 
-All networks use **USDC** with 6 decimals. Gas fees are sponsored by the RelAI facilitator.
+All networks support **USDC** (6 decimals). On SKALE Base networks, the SDK also supports:
+
+- **SKALE Base (`skale-base`)**: USDT (`0x2bF5bF154b515EaA82C31a65ec11554fF5aF7fCA`), WBTC (`0x1aeeCFE5454c83B42D8A316246CAc9739E7f690e`), WETH (`0x7bD39ABBd0Dd13103542cAe3276C7fA332bCA486`)
+- **SKALE Base Sepolia (`skale-base-sepolia`)**: USDT (`0x3ca0a49f511c2c89c4dcbbf1731120d8919050bf`), WBTC (`0x4512eacd4186b025186e1cf6cc0d89497c530e87`), WETH (`0xf94056bd7f6965db3757e1b145f200b7346b4fc0`)
+
+Gas fees are sponsored by the RelAI facilitator.
 
 ---
 
