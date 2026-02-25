@@ -37,6 +37,7 @@ import {
   type X402FetchInit,
   type X402RelayWsConfig,
   type X402IntegritasConfig,
+  type X402NetworkSelectionMode,
 } from '../client';
 import type { SolanaWallet, EvmWallet, WalletSet } from '../types';
 import {
@@ -66,6 +67,8 @@ export interface UseRelaiPaymentConfig {
   integritas?: boolean | X402IntegritasConfig;
   /** Preferred network when multiple options available */
   preferredNetwork?: RelaiNetwork;
+  /** Preferred-network handling mode when multiple accepts are returned */
+  networkSelectionMode?: X402NetworkSelectionMode;
   /** Custom Solana RPC URL */
   solanaRpcUrl?: string;
   /** Custom facilitator URL (default: RelAI) */
@@ -123,6 +126,7 @@ export function useRelaiPayment(config: UseRelaiPaymentConfig = {}): UseRelaiPay
     relayWs,
     integritas,
     preferredNetwork,
+    networkSelectionMode,
     solanaRpcUrl,
     facilitatorUrl,
     maxAmountAtomic,
@@ -155,13 +159,24 @@ export function useRelaiPayment(config: UseRelaiPaymentConfig = {}): UseRelaiPay
       relayWs,
       integritas,
       preferredNetwork,
+      networkSelectionMode,
       maxAmountAtomic,
       verbose,
     };
     if (solanaRpcUrl) cfg.solanaRpcUrl = solanaRpcUrl;
     if (facilitatorUrl) cfg.facilitatorUrl = facilitatorUrl;
     return createX402Client(cfg);
-  }, [wallets, relayWs, integritas, preferredNetwork, solanaRpcUrl, facilitatorUrl, maxAmountAtomic, verbose]);
+  }, [
+    wallets,
+    relayWs,
+    integritas,
+    preferredNetwork,
+    networkSelectionMode,
+    solanaRpcUrl,
+    facilitatorUrl,
+    maxAmountAtomic,
+    verbose,
+  ]);
 
   // Reset
   const reset = useCallback(() => {

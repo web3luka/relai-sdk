@@ -582,4 +582,132 @@ describe('createX402Client relay websocket transport', () => {
     expect(normalizedHeaders['x-integritas']).toBe('true');
     expect(normalizedHeaders['x-integritas-flow']).toBe('single');
   });
+
+  it('falls back to any payable network by default when preferred network wallet is unavailable', async () => {
+    const signTypedData = vi.fn().mockResolvedValue(`0x${'44'.repeat(65)}`);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = (init?.headers || {}) as Record<string, string>;
+      const normalizedHeaders = Object.fromEntries(
+        Object.entries(headers).map(([key, value]) => [key.toLowerCase(), String(value)]),
+      );
+
+      if (!normalizedHeaders['x-payment']) {
+        return new Response(
+          JSON.stringify({
+            x402Version: 2,
+            accepts: [
+              {
+                scheme: 'exact',
+                network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+                amount: '10000',
+                asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+                payTo: '22QvLr6qgGteY1JXfaYoXg1H8ejsx1br6unS73oQ5ebM',
+                extra: {
+                  feePayer: '4x4ZhcqiT1FnirM8Ne97iVupkN4NcQgc2YYbE2jDZbZn',
+                },
+              },
+              {
+                scheme: 'exact',
+                network: 'eip155:8453',
+                amount: '10000',
+                asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+                payTo: '0x0000000000000000000000000000000000000001',
+                extra: {
+                  relayerContract: '0x457Db7ceBAdaF6A043AcE833de95C46E982cEdC8',
+                  domainName: 'A402',
+                  domainVersion: '1',
+                },
+              },
+            ],
+          }),
+          {
+            status: 402,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      }
+
+      return new Response(JSON.stringify({ ok: true, transport: 'http' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const client = createX402Client({
+      wallets: {
+        evm: {
+          address: '0x00000000000000000000000000000000000000aa',
+          signTypedData,
+        },
+      },
+      preferredNetwork: 'solana',
+      verbose: false,
+    });
+
+    const response = await client.fetch('https://api.relai.fi/protected', { method: 'GET' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, transport: 'http' });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(signTypedData).toHaveBeenCalledTimes(1);
+  });
+
+  it('enforces strict preferred network selection mode', async () => {
+    const signTypedData = vi.fn().mockResolvedValue(`0x${'55'.repeat(65)}`);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          x402Version: 2,
+          accepts: [
+            {
+              scheme: 'exact',
+              network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+              amount: '10000',
+              asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+              payTo: '22QvLr6qgGteY1JXfaYoXg1H8ejsx1br6unS73oQ5ebM',
+              extra: {
+                feePayer: '4x4ZhcqiT1FnirM8Ne97iVupkN4NcQgc2YYbE2jDZbZn',
+              },
+            },
+            {
+              scheme: 'exact',
+              network: 'eip155:8453',
+              amount: '10000',
+              asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+              payTo: '0x0000000000000000000000000000000000000001',
+              extra: {
+                relayerContract: '0x457Db7ceBAdaF6A043AcE833de95C46E982cEdC8',
+                domainName: 'A402',
+                domainVersion: '1',
+              },
+            },
+          ],
+        }),
+        {
+          status: 402,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      ),
+    );
+
+    const client = createX402Client({
+      wallets: {
+        evm: {
+          address: '0x00000000000000000000000000000000000000aa',
+          signTypedData,
+        },
+      },
+      preferredNetwork: 'solana',
+      networkSelectionMode: 'strict_preferred',
+      verbose: false,
+    });
+
+    await expect(client.fetch('https://api.relai.fi/protected', { method: 'GET' })).rejects.toThrow(
+      /Preferred network solana/i,
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(signTypedData).not.toHaveBeenCalled();
+  });
 });

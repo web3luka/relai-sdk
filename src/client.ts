@@ -27,6 +27,8 @@ import {
 // Types
 // ============================================================================
 
+export type X402NetworkSelectionMode = 'prefer_then_any' | 'strict_preferred';
+
 export interface X402ClientConfig {
   /** Multi-chain wallets (Solana + EVM) */
   wallets?: WalletSet;
@@ -38,6 +40,12 @@ export interface X402ClientConfig {
   relayWs?: X402RelayWsConfig;
   /** Preferred network when multiple options available */
   preferredNetwork?: RelaiNetwork;
+  /**
+   * How to handle 402 accepts when preferredNetwork is set.
+   * - prefer_then_any (default): prefer preferredNetwork, then fall back to any payable option.
+   * - strict_preferred: only accept preferredNetwork, fail otherwise.
+   */
+  networkSelectionMode?: X402NetworkSelectionMode;
   /** Custom Solana RPC URL */
   solanaRpcUrl?: string;
   /** Custom EVM RPC URLs per network (e.g. { 'skale-base': 'https://...' }) */
@@ -172,6 +180,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     facilitatorUrl = RELAI_FACILITATOR_URL,
     relayWs,
     preferredNetwork,
+    networkSelectionMode = 'prefer_then_any',
     solanaRpcUrl = 'https://api.mainnet-beta.solana.com',
     evmRpcUrls = {},
     maxAmountAtomic,
@@ -741,6 +750,30 @@ export function createX402Client(config: X402ClientConfig): X402Client {
   // -----------------------------------------------------------------------
   // Select a payment option from the 402 response's `accepts` array
   // -----------------------------------------------------------------------
+  function selectAcceptForWallet(a: any): { accept: any; chain: 'solana' | 'evm' } | null {
+    const net = a.network || '';
+    if (isSolana(net) && hasSolanaWallet) {
+      return { accept: a, chain: 'solana' };
+    }
+    if (isEvm(net) && effectiveWallets.evm) {
+      return { accept: a, chain: 'evm' };
+    }
+    return null;
+  }
+
+  function buildNoWalletError(accepts: any[], isWs: boolean): string {
+    const networks = accepts.map((a: any) => a.network).join(', ');
+    if (preferredNetwork && networkSelectionMode === 'strict_preferred') {
+      const preferredCaip2 = NETWORK_CAIP2[preferredNetwork];
+      return (
+        `[relai-x402] Preferred network ${preferredNetwork} (${preferredCaip2}) is required, ` +
+        `but no compatible wallet is connected. Available networks: ${networks}`
+      );
+    }
+
+    return `[relai-x402] No wallet available for${isWs ? ' WS' : ''} networks: ${networks}`;
+  }
+
   function selectAccept(accepts: any[]): { accept: any; chain: 'solana' | 'evm' } | null {
     // 1) Preferred network first
     if (preferredNetwork) {
@@ -748,19 +781,24 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       for (const a of accepts) {
         const net = a.network || '';
         if (net === preferredNetwork || net === caip2) {
-          const chain = isSolana(net) ? 'solana' as const : 'evm' as const;
-          if ((chain === 'solana' && hasSolanaWallet) || (chain === 'evm' && effectiveWallets.evm)) {
-            return { accept: a, chain };
+          const selected = selectAcceptForWallet(a);
+          if (selected) {
+            return selected;
           }
         }
+      }
+
+      if (networkSelectionMode === 'strict_preferred') {
+        return null;
       }
     }
 
     // 2) First option we have a wallet for
     for (const a of accepts) {
-      const net = a.network || '';
-      if (isSolana(net) && hasSolanaWallet) return { accept: a, chain: 'solana' };
-      if (isEvm(net) && effectiveWallets.evm) return { accept: a, chain: 'evm' };
+      const selected = selectAcceptForWallet(a);
+      if (selected) {
+        return selected;
+      }
     }
 
     return null;
@@ -1209,8 +1247,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
         const wsSelected = selectAccept(wsAccepts);
         if (!wsSelected) {
-          const networks = wsAccepts.map((a: any) => a.network).join(', ');
-          throw new Error(`[relai-x402] No wallet available for WS networks: ${networks}`);
+          throw new Error(buildNoWalletError(wsAccepts, true));
         }
 
         const { accept, chain } = wsSelected;
@@ -1306,8 +1343,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
     const selected = selectAccept(accepts);
     if (!selected) {
-      const networks = accepts.map((a: any) => a.network).join(', ');
-      throw new Error(`[relai-x402] No wallet available for networks: ${networks}`);
+      throw new Error(buildNoWalletError(accepts, false));
     }
 
     const { accept, chain } = selected;

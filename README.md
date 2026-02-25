@@ -62,6 +62,11 @@ const client = createX402Client({
     solana: solanaWallet,  // @solana/wallet-adapter compatible
     evm: evmWallet,        // wagmi/viem compatible
   },
+  preferredNetwork: 'base',
+  // default: 'prefer_then_any'
+  // - prefer_then_any: try preferred network, then any payable wallet/network
+  // - strict_preferred: fail if preferred network isn't payable with connected wallets
+  networkSelectionMode: 'prefer_then_any',
   integritas: {
     enabled: true,
     flow: 'single', // or 'dual'
@@ -76,6 +81,24 @@ const client = createX402Client({
 // 402 responses are handled automatically
 const response = await client.fetch('https://api.example.com/protected');
 const data = await response.json();
+```
+
+### Preferred network behavior
+
+If the 402 challenge contains multiple `accepts` networks:
+
+- `networkSelectionMode: 'prefer_then_any'` (**default**) tries `preferredNetwork` first, then falls back to any payable option.
+- `networkSelectionMode: 'strict_preferred'` only allows the preferred network and throws if it's not payable with connected wallets.
+
+```typescript
+const client = createX402Client({
+  wallets: { evm: evmWallet },
+  preferredNetwork: 'solana',
+  networkSelectionMode: 'strict_preferred',
+});
+
+// Throws if only Solana accept is preferred but no Solana wallet is connected.
+await client.fetch('https://api.example.com/protected');
 ```
 
 ### Integritas (client)
@@ -260,6 +283,7 @@ Creates a fetch wrapper that automatically handles 402 Payment Required response
 | `integritas` | `boolean \| X402IntegritasConfig` | `undefined` | Automatically set Integritas headers |
 | `facilitatorUrl` | `string` | RelAI facilitator | Custom facilitator endpoint |
 | `preferredNetwork` | `RelaiNetwork` | — | Prefer this network when multiple `accepts` |
+| `networkSelectionMode` | `'prefer_then_any' \| 'strict_preferred'` | `'prefer_then_any'` | Selection policy for `preferredNetwork` when multiple `accepts` are returned |
 | `solanaRpcUrl` | `string` | `https://api.mainnet-beta.solana.com` | Solana RPC (use Helius/Quicknode for production) |
 | `evmRpcUrls` | `Record<string, string>` | Built-in defaults | RPC URLs per network name |
 | `maxAmountAtomic` | `string` | — | Safety cap on payment amount |

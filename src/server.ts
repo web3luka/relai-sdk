@@ -131,6 +131,7 @@ const usdPriceCache = new Map<string, { usd: number; expiresAt: number }>();
 const COINGECKO_ID_BY_SYMBOL: Record<string, string> = {
   WETH: 'ethereum',
   WBTC: 'bitcoin',
+  BBRL: 'braza-brl',
 };
 
 function isStableUsdToken(token: NetworkToken): boolean {

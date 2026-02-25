@@ -19,6 +19,7 @@ export { createX402Client } from './client';
 export type {
   X402ClientConfig,
   X402Client,
+  X402NetworkSelectionMode,
   X402RelayWsConfig,
   X402RelayWsResponse,
   X402RelayWsError,
