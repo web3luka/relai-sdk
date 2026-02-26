@@ -128,10 +128,13 @@ export function stripePayTo(
 const USD_PRICE_CACHE_TTL_MS = 60 * 1000;
 const usdPriceCache = new Map<string, { usd: number; expiresAt: number }>();
 
+const GECKOTERMINAL_NETWORK_BY_RELAI: Partial<Record<RelaiNetwork, string>> = {
+  polygon: 'polygon_pos',
+};
+
 const COINGECKO_ID_BY_SYMBOL: Record<string, string> = {
   WETH: 'ethereum',
   WBTC: 'bitcoin',
-  BBRL: 'braza-brl',
 };
 
 function isStableUsdToken(token: NetworkToken): boolean {
@@ -173,6 +176,50 @@ async function fetchUsdPriceFromCoinGecko(coinId: string): Promise<number> {
   return usd;
 }
 
+async function fetchUsdPriceFromGeckoTerminal(network: RelaiNetwork, tokenAddress: string): Promise<number> {
+  const geckoNetwork = GECKOTERMINAL_NETWORK_BY_RELAI[network];
+  if (!geckoNetwork) {
+    throw new Error(`GeckoTerminal network not configured for ${network}`);
+  }
+
+  const normalizedAddress = String(tokenAddress || '').trim().toLowerCase();
+  if (!normalizedAddress) {
+    throw new Error('GeckoTerminal requires a token address');
+  }
+
+  const cacheKey = `gt:${geckoNetwork}:${normalizedAddress}`;
+  const now = Date.now();
+  const cached = usdPriceCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.usd;
+  }
+
+  const url = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(geckoNetwork)}/tokens/${encodeURIComponent(normalizedAddress)}`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`GeckoTerminal price request failed: HTTP ${res.status}`);
+  }
+
+  const payload = await res.json() as { data?: { attributes?: { price_usd?: string | number } } };
+  const usd = Number(payload?.data?.attributes?.price_usd);
+  if (!Number.isFinite(usd) || usd <= 0) {
+    throw new Error(`GeckoTerminal returned invalid usd price for ${normalizedAddress} on ${geckoNetwork}`);
+  }
+
+  usdPriceCache.set(cacheKey, {
+    usd,
+    expiresAt: now + USD_PRICE_CACHE_TTL_MS,
+  });
+
+  return usd;
+}
+
 async function resolveAmountAtomicFromUsd({
   priceUsd,
   token,
@@ -199,10 +246,22 @@ async function resolveAmountAtomicFromUsd({
   }
 
   const overrideEnv = process.env[`EVM_TOKEN_PRICE_${symbol}_USD`];
-  const usdPerToken =
-    overrideEnv && Number(overrideEnv) > 0
-      ? Number(overrideEnv)
-      : await fetchUsdPriceFromCoinGecko(coinGeckoId);
+  let usdPerToken: number;
+  if (overrideEnv && Number(overrideEnv) > 0) {
+    usdPerToken = Number(overrideEnv);
+  } else {
+    try {
+      usdPerToken = await fetchUsdPriceFromCoinGecko(coinGeckoId);
+    } catch (coinGeckoError) {
+      try {
+        usdPerToken = await fetchUsdPriceFromGeckoTerminal(network, token.address);
+      } catch (geckoTerminalError) {
+        throw new Error(
+          `USD quote failed for ${symbol || token.address} on ${network}. CoinGecko: ${coinGeckoError instanceof Error ? coinGeckoError.message : String(coinGeckoError)}; GeckoTerminal: ${geckoTerminalError instanceof Error ? geckoTerminalError.message : String(geckoTerminalError)}`,
+        );
+      }
+    }
+  }
 
   const tokenAmount = priceUsd / usdPerToken;
   const rawUnits = tokenAmount * Math.pow(10, decimals);

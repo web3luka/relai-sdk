@@ -176,14 +176,6 @@ export const NETWORK_TOKENS: Partial<Record<RelaiNetwork, NetworkToken[]>> = {
       domainVersion: '2',
       isStableUsd: true,
     },
-    {
-      address: '0xB6BB22f4D1e58E9E43eFa2ec7F572D215B3CF08a',
-      symbol: 'BBRL',
-      name: 'Braza BRL',
-      decimals: 18,
-      domainVersion: '2',
-      isStableUsd: false,
-    },
   ],
   'ethereum': [
     {
