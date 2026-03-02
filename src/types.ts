@@ -20,7 +20,8 @@ export type RelaiNetwork =
   | 'skale-base-sepolia'
   | 'skale-bite'
   | 'polygon'
-  | 'ethereum';
+  | 'ethereum'
+  | 'telos';
 
 /** CAIP-2 network identifiers */
 export const NETWORK_CAIP2: Record<RelaiNetwork, string> = {
@@ -32,6 +33,7 @@ export const NETWORK_CAIP2: Record<RelaiNetwork, string> = {
   'skale-bite': 'eip155:103698795',
   'polygon': 'eip155:137',
   'ethereum': 'eip155:1',
+  'telos': 'eip155:40',
 };
 
 /** Reverse lookup: CAIP-2 → simple network name */
@@ -48,6 +50,7 @@ export const CHAIN_IDS: Record<string, number> = {
   'skale-bite': 103698795,
   'polygon': 137,
   'ethereum': 1,
+  'telos': 40,
 };
 
 export interface NetworkToken {
@@ -57,6 +60,7 @@ export interface NetworkToken {
   decimals: number;
   domainVersion?: string;
   isStableUsd?: boolean;
+  standards?: string[];
 }
 
 /** Token metadata per network (default token is always the first entry) */
@@ -70,14 +74,7 @@ export const NETWORK_TOKENS: Partial<Record<RelaiNetwork, NetworkToken[]>> = {
     },
   ],
   'base': [
-    {
-      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-      symbol: 'USDC',
-      name: 'USD Coin',
-      decimals: 6,
-      domainVersion: '2',
-      isStableUsd: true,
-    },
+    { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', name: 'USD Coin', decimals: 6, domainVersion: '2', isStableUsd: true },
   ],
   'avalanche': [
     {
@@ -87,6 +84,16 @@ export const NETWORK_TOKENS: Partial<Record<RelaiNetwork, NetworkToken[]>> = {
       decimals: 6,
       domainVersion: '2',
       isStableUsd: true,
+    },
+  ],
+  'telos': [
+    {
+      address: '0x818ec0a7fe18ff94269904fced6ae3dae6d6dc0b',
+      symbol: 'USDC',
+      name: 'USD Coin',
+      decimals: 6,
+      isStableUsd: true,
+      standards: ['eip2612'],
     },
   ],
   'skale-base': [
@@ -208,6 +215,7 @@ export const USDC_ADDRESSES: Record<RelaiNetwork, string> = {
   'skale-bite': '0xc4083B1E81ceb461Ccef3FDa8A9F24F0d764B6D8',
   'polygon': '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
   'ethereum': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+  'telos': '0x818ec0a7fe18ff94269904fced6ae3dae6d6dc0b',
 };
 
 /** Explorer URLs per network */
@@ -220,6 +228,7 @@ export const EXPLORER_TX_URL: Record<RelaiNetwork, (tx: string) => string> = {
   'skale-bite': (tx) => `https://base-sepolia-testnet.explorer.skalenodes.com/tx/${tx}`,
   'polygon': (tx) => `https://polygonscan.com/tx/${tx}`,
   'ethereum': (tx) => `https://etherscan.io/tx/${tx}`,
+  'telos': (tx) => `https://teloscan.io/tx/${tx}`,
 };
 
 /** Human-readable network labels */
@@ -232,6 +241,7 @@ export const NETWORK_LABELS: Record<RelaiNetwork, string> = {
   'skale-bite': 'SKALE BITE V2',
   'polygon': 'Polygon',
   'ethereum': 'Ethereum',
+  'telos': 'Telos EVM',
 };
 
 /** Legacy CAIP-2 exports for backward compatibility */
@@ -252,6 +262,7 @@ export const RELAI_NETWORKS: RelaiNetwork[] = [
   'skale-bite',
   'polygon',
   'ethereum',
+  'telos',
 ];
 
 /** Check if a network is Solana-based */
@@ -261,7 +272,7 @@ export function isSolana(network: string): boolean {
 
 /** Check if a network is EVM-based */
 export function isEvm(network: string): boolean {
-  return ['base', 'avalanche', 'skale-base', 'skale-base-sepolia', 'skale-bite', 'polygon', 'ethereum'].includes(network) || network.startsWith('eip155:');
+  return ['base', 'avalanche', 'skale-base', 'skale-base-sepolia', 'skale-bite', 'polygon', 'ethereum', 'telos'].includes(network) || network.startsWith('eip155:');
 }
 
 /** Normalize CAIP-2 or simple name to RelaiNetwork */

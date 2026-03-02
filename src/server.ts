@@ -133,8 +133,13 @@ const GECKOTERMINAL_NETWORK_BY_RELAI: Partial<Record<RelaiNetwork, string>> = {
 };
 
 const COINGECKO_ID_BY_SYMBOL: Record<string, string> = {
-  WETH: 'ethereum',
-  WBTC: 'bitcoin',
+  WETH:  'ethereum',
+  WBTC:  'bitcoin',
+  USDT:  'tether',
+  EURC:  'euro-coin',
+  DAI:   'dai',
+  cbETH: 'coinbase-wrapped-staked-eth',
+  cbBTC: 'coinbase-wrapped-btc',
 };
 
 function isStableUsdToken(token: NetworkToken): boolean {

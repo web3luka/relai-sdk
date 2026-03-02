@@ -17,6 +17,7 @@ import {
   RELAI_FACILITATOR_URL,
   NETWORK_CAIP2,
   CHAIN_IDS,
+  NETWORK_TOKENS,
   isSolana,
   isEvm,
   normalizeNetwork,
@@ -171,6 +172,7 @@ const DEFAULT_EVM_RPC_URLS: Record<string, string> = {
   'avalanche': 'https://api.avax.network/ext/bc/C/rpc',
   'polygon': 'https://polygon-rpc.com',
   'ethereum': 'https://ethereum-rpc.publicnode.com',
+  'telos': 'https://rpc.telos.net',
 };
 
 export function createX402Client(config: X402ClientConfig): X402Client {
@@ -981,39 +983,101 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       verifyingContract: useRelayer ? extra.relayerContract : accept.asset,
     };
 
-    const validAfter = 0;
-    const validBefore = Math.floor(Date.now() / 1000) + 3600;
-    const nonce = '0x' + [...crypto.getRandomValues(new Uint8Array(32))]
-      .map(b => b.toString(16).padStart(2, '0')).join('');
+    // Detect whether token supports EIP-2612 permit (but not EIP-3009)
+    const tokenNetworkKey = network || rawNetwork;
+    const networkTokens = NETWORK_TOKENS[tokenNetworkKey as keyof typeof NETWORK_TOKENS];
+    const assetLower = (accept.asset || '').toLowerCase();
+    const tokenInfo = networkTokens?.find((t: any) => t.address.toLowerCase() === assetLower) || networkTokens?.[0];
+    const tokenStandards: string[] = Array.isArray(tokenInfo?.standards) ? tokenInfo.standards : [];
+    const hasEip3009 = tokenStandards.some((s: string) => s.toLowerCase() === 'eip3009');
+    const hasEip2612 = tokenStandards.some((s: string) => s.toLowerCase() === 'eip2612');
+    const usePermit2612 = !hasEip3009 && hasEip2612;
 
-    const types = {
-      TransferWithAuthorization: [
-        { name: 'from', type: 'address' },
-        { name: 'to', type: 'address' },
-        { name: 'value', type: 'uint256' },
-        { name: 'validAfter', type: 'uint256' },
-        { name: 'validBefore', type: 'uint256' },
-        { name: 'nonce', type: 'bytes32' },
-      ],
-    };
+    let message: Record<string, unknown>;
+    let signature: string;
+    let authorizationScheme: string;
 
-    const message = {
-      from: evmWallet.address,
-      to: accept.payTo,
-      value: paymentAmount,
-      validAfter: String(validAfter),
-      validBefore: String(validBefore),
-      nonce,
-    };
+    if (usePermit2612) {
+      // EIP-2612 permit flow: read nonce from contract, sign Permit typed data
+      // spender = feePayer (RelAI backend) who will call permit + transferFrom
+      const spender = extra.feePayer || accept.payTo;
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
 
-    log('Signing EIP-3009 transferWithAuthorization on chain', chainId);
+      let nonce = 0;
+      if (rpcUrl) {
+        try {
+          const paddedAddress = evmWallet.address.toLowerCase().replace('0x', '').padStart(64, '0');
+          const nonceHex = await evmRpcCall(rpcUrl, accept.asset, '0x7ecebe00' + paddedAddress);
+          nonce = nonceHex ? parseInt(nonceHex, 16) : 0;
+        } catch { nonce = 0; }
+      }
 
-    const signature = await evmWallet.signTypedData({
-      domain,
-      types,
-      message,
-      primaryType: 'TransferWithAuthorization',
-    });
+      const permitTypes = {
+        Permit: [
+          { name: 'owner', type: 'address' },
+          { name: 'spender', type: 'address' },
+          { name: 'value', type: 'uint256' },
+          { name: 'nonce', type: 'uint256' },
+          { name: 'deadline', type: 'uint256' },
+        ],
+      };
+
+      message = {
+        owner: evmWallet.address,
+        spender,
+        value: paymentAmount,
+        nonce: String(nonce),
+        deadline: String(deadline),
+      };
+
+      log('Signing EIP-2612 permit on chain', chainId);
+
+      signature = await evmWallet.signTypedData({
+        domain,
+        types: permitTypes,
+        message,
+        primaryType: 'Permit',
+      });
+
+      authorizationScheme = 'eip2612';
+    } else {
+      // EIP-3009 transferWithAuthorization flow (default)
+      const validAfter = 0;
+      const validBefore = Math.floor(Date.now() / 1000) + 3600;
+      const nonce = '0x' + [...crypto.getRandomValues(new Uint8Array(32))]
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+
+      const transferTypes = {
+        TransferWithAuthorization: [
+          { name: 'from', type: 'address' },
+          { name: 'to', type: 'address' },
+          { name: 'value', type: 'uint256' },
+          { name: 'validAfter', type: 'uint256' },
+          { name: 'validBefore', type: 'uint256' },
+          { name: 'nonce', type: 'bytes32' },
+        ],
+      };
+
+      message = {
+        from: evmWallet.address,
+        to: accept.payTo,
+        value: paymentAmount,
+        validAfter: String(validAfter),
+        validBefore: String(validBefore),
+        nonce,
+      };
+
+      log('Signing EIP-3009 transferWithAuthorization on chain', chainId);
+
+      signature = await evmWallet.signTypedData({
+        domain,
+        types: transferTypes,
+        message,
+        primaryType: 'TransferWithAuthorization',
+      });
+
+      authorizationScheme = 'eip3009';
+    }
 
     // Build x402 v2 payment payload
     const paymentPayload = {
@@ -1023,6 +1087,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       payload: {
         authorization: message,
         signature,
+        authorizationScheme,
       },
       facilitatorUrl,
     };
@@ -1067,9 +1132,9 @@ export function createX402Client(config: X402ClientConfig): X402Client {
         : TOKEN_PROGRAM_ID
       : TOKEN_PROGRAM_ID;
 
-    // Get ATAs
+    // Get ATAs (allowOffCurve=true for smart wallets / PDA signers)
     const sourceAta = await getAssociatedTokenAddress(
-      mintPubkey, userPubkey, false, programId,
+      mintPubkey, userPubkey, true, programId,
     );
     const destinationAta = await getAssociatedTokenAddress(
       mintPubkey, merchantPubkey, true, programId,
