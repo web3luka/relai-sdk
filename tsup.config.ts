@@ -5,6 +5,7 @@ export default defineConfig({
     'src/index.ts',
     'src/server.ts',
     'src/client.ts',
+    'src/crossmint.ts',
     'src/react/index.ts',
     'src/utils/index.ts',
   ],
