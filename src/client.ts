@@ -57,6 +57,8 @@ export interface X402ClientConfig {
   integritas?: boolean | X402IntegritasConfig;
   /** Enable verbose logging */
   verbose?: boolean;
+  /** Default headers added to every request (e.g. X-Service-Key, X-Agent-ID for agent use) */
+  defaultHeaders?: Record<string, string>;
 }
 
 export type X402IntegritasFlow = 'single' | 'dual';
@@ -188,6 +190,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     maxAmountAtomic,
     integritas,
     verbose = false,
+    defaultHeaders = {},
   } = config;
 
   const relayWsEnabled = relayWs?.enabled === true;
@@ -537,6 +540,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     const fromInput = input instanceof Request ? headersToRecord(input.headers) : {};
     const fromInit = headersToRecord(init?.headers);
     const merged = {
+      ...defaultHeaders,
       ...fromInput,
       ...fromInit,
     };
