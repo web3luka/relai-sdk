@@ -300,6 +300,13 @@ import {
   fromAtomicUnits,
 } from '@relai-fi/x402/utils';
 
+// Management API — create/manage APIs, pricing, analytics, agent bootstrap
+import {
+  createManagementClient,
+  bootstrapAgentKeySolana,
+  bootstrapAgentKeyEvm,
+} from '@relai-fi/x402/management';
+
 // Types & constants
 import {
   RELAI_NETWORKS,
@@ -458,6 +465,82 @@ app.get('/api/solana-data', relai.protect({
 | `payer` | `string` | Payer wallet address |
 | `network` | `string` | Network name (e.g., `base`) |
 | `amount` | `number` | Price in USD |
+
+---
+
+## Management API
+
+Programmatically create and manage monetised APIs, update pricing, and read analytics. Designed for agents and CI/CD — no browser needed.
+
+```typescript
+import { createManagementClient } from '@relai-fi/x402/management';
+
+const mgmt = createManagementClient({ serviceKey: process.env.RELAI_SERVICE_KEY! });
+
+// Create a monetised API
+const api = await mgmt.createApi({
+  name: 'My ML API',
+  baseUrl: 'https://inference.example.com',
+  merchantWallet: '0xYourWallet',
+  network: 'base',
+  endpoints: [
+    { path: '/v1/predict', method: 'post', usdPrice: 0.05 },
+    { path: '/v1/status',  method: 'get',  usdPrice: 0.001 },
+  ],
+});
+
+// List / get / update / delete
+const all   = await mgmt.listApis();
+const one   = await mgmt.getApi(api.apiId);
+await mgmt.updateApi(api.apiId, { description: 'Updated description' });
+await mgmt.deleteApi(api.apiId);
+
+// Pricing
+await mgmt.setPricing(api.apiId, [{ path: '/v1/predict', method: 'post', usdPrice: 0.10 }]);
+const pricing = await mgmt.getPricing(api.apiId);
+
+// Analytics
+const stats    = await mgmt.getStats(api.apiId);
+const payments = await mgmt.getPayments(api.apiId, { limit: 20, from: '2025-01-01' });
+const logs     = await mgmt.getLogs(api.apiId, { limit: 20 });
+```
+
+### Agent self-setup (autonomous key provisioning)
+
+Agents can provision their own service key with zero human involvement — no dashboard, no JWT, no copy-paste. Run once and store the key.
+
+```typescript
+import { bootstrapAgentKeySolana, bootstrapAgentKeyEvm } from '@relai-fi/x402/management';
+import { Keypair } from '@solana/web3.js';
+
+// Solana agent
+const keypair = Keypair.fromSecretKey(Buffer.from(process.env.AGENT_PRIVATE_KEY!, 'base64'));
+const { key } = await bootstrapAgentKeySolana(keypair, 'my-agent');
+// → key: "sk_live_..."  — store securely, never re-run
+
+// EVM agent (ethers.js Wallet)
+import { ethers } from 'ethers';
+const wallet = new ethers.Wallet(process.env.AGENT_PRIVATE_KEY!);
+const { key: evmKey } = await bootstrapAgentKeyEvm(wallet, 'my-evm-agent');
+```
+
+Once you have a service key, combine it with `createX402Client` for a fully autonomous agent:
+
+```typescript
+import { createX402Client } from '@relai-fi/x402/client';
+import { createManagementClient } from '@relai-fi/x402/management';
+
+const serviceKey = process.env.RELAI_SERVICE_KEY!;
+
+// Pay for APIs
+const client = createX402Client({
+  wallets: { solana: agentWallet },
+  defaultHeaders: { 'X-Service-Key': serviceKey },
+});
+
+// Manage APIs
+const mgmt = createManagementClient({ serviceKey });
+```
 
 ---
 
