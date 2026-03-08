@@ -128,6 +128,52 @@ await client.fetch('https://api.relai.fi/relay/<apiId>/v1/chat/completions', {
 });
 ```
 
+### AI Agents
+
+Use `defaultHeaders` to attach agent identity headers to every request — no need to set them manually on each call.
+
+```typescript
+import { createX402Client } from '@relai-fi/x402/client';
+import { Keypair } from '@solana/web3.js';
+
+// Agent wallet (e.g. loaded from env or key management)
+const keypair = Keypair.fromSecretKey(Buffer.from(process.env.AGENT_PRIVATE_KEY!, 'base64'));
+
+const agentWallet = {
+  publicKey: keypair.publicKey,
+  signTransaction: async (tx: any) => {
+    tx.sign([keypair]);
+    return tx;
+  },
+};
+
+const client = createX402Client({
+  wallets: { solana: agentWallet },
+  preferredNetwork: 'solana',
+  // Attach agent identity headers to every request automatically
+  defaultHeaders: {
+    'X-Service-Key': process.env.RELAI_SERVICE_KEY!,  // RelAI Service Key
+    'X-Agent-ID': process.env.AGENT_ID!,              // Your agent identifier
+  },
+});
+
+// Agent calls a paid API — payment + identity headers are handled automatically
+const response = await client.fetch('https://api.relai.fi/relay/<apiId>/v1/chat/completions', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'Summarize the latest market news.' }],
+  }),
+});
+
+const result = await response.json();
+```
+
+> **Tip:** `defaultHeaders` are merged with per-request headers. Per-request headers always win, so you can override them on individual calls when needed.
+
+---
+
 ### WebSocket relay transport (optional)
 
 If your protected API is behind a relay URL like `https://api.relai.fi/relay/:apiId/...`
@@ -288,6 +334,7 @@ Creates a fetch wrapper that automatically handles 402 Payment Required response
 | `evmRpcUrls` | `Record<string, string>` | Built-in defaults | RPC URLs per network name |
 | `maxAmountAtomic` | `string` | — | Safety cap on payment amount |
 | `verbose` | `boolean` | `false` | Log payment flow to console |
+| `defaultHeaders` | `Record<string, string>` | `{}` | Headers added to every request (e.g. `X-Service-Key`, `X-Agent-ID`) |
 
 **`integritas` options:**
 
