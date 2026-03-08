@@ -8,6 +8,7 @@ export default defineConfig({
     'src/crossmint.ts',
     'src/react/index.ts',
     'src/utils/index.ts',
+    'src/management.ts',
   ],
   format: ['cjs', 'esm'],
   dts: true,

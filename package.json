@@ -1,6 +1,6 @@
 {
   "name": "@relai-fi/x402",
-  "version": "0.5.24",
+  "version": "0.5.25",
   "description": "Unified x402 payment SDK for Solana, Base, Avalanche, SKALE Base, SKALE BITE, Polygon, and Ethereum. Automatic 402 handling with zero gas fees.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -85,6 +85,11 @@
       "types": "./dist/utils/index.d.ts",
       "import": "./dist/utils/index.js",
       "require": "./dist/utils/index.cjs"
+    },
+    "./management": {
+      "types": "./dist/management.d.ts",
+      "import": "./dist/management.js",
+      "require": "./dist/management.cjs"
     }
   }
 }
