@@ -27,6 +27,9 @@ export interface RelaiApi {
   x402Version: number;
   status: string;
   merchantWallet: string;
+  solanaWallet?: string | null;
+  /** EVM wallet for cross-chain payments. Only relevant when network is Solana. */
+  evmCrossChainWallet?: string | null;
   websiteUrl?: string;
   logoUrl?: string;
   createdAt: string;
@@ -49,6 +52,10 @@ export interface CreateApiInput {
   name: string;
   baseUrl: string;
   merchantWallet: string;
+  /** Solana wallet for cross-chain payments. Only relevant when network is EVM. */
+  solanaWallet?: string;
+  /** EVM wallet for cross-chain payments. Only relevant when network is Solana. */
+  evmCrossChainWallet?: string;
   network: string;
   description?: string;
   websiteUrl?: string;
@@ -61,6 +68,10 @@ export interface UpdateApiInput {
   description?: string;
   baseUrl?: string;
   merchantWallet?: string;
+  /** Solana wallet for cross-chain payments. Set to null to remove. */
+  solanaWallet?: string | null;
+  /** EVM wallet for cross-chain payments. Set to null to remove. */
+  evmCrossChainWallet?: string | null;
   websiteUrl?: string;
   logoUrl?: string;
 }
