@@ -122,6 +122,36 @@ export interface ApiLogsResult {
   nextCursor: string | null;
 }
 
+// ── Bridge types ─────────────────────────────────────────────────────────────
+
+export interface BridgeQuoteResult {
+  inputAmount: number;
+  outputAmount: number;
+  fee: number;
+  feeBps: number;
+  inputUsd: number;
+  outputUsd: number;
+  direction: 'solana-to-skale' | 'skale-to-solana';
+  from: string;
+  to: string;
+}
+
+export interface BridgeBalances {
+  solana:   { atomic: number; usd: number };
+  skaleBase: { atomic: number; usd: number };
+  base:      { atomic: number; usd: number };
+}
+
+export interface BridgeResult {
+  success: boolean;
+  direction: 'solana-to-skale' | 'skale-to-solana';
+  destinationWallet: string;
+  amountOut: number;
+  amountOutUsd: number;
+  txHash: string;
+  explorerUrl: string;
+}
+
 export interface AgentBootstrapResult {
   key: string;
   label: string;
@@ -225,6 +255,47 @@ export interface RelaiManagementClient {
   getStats(apiId: string): Promise<ApiStats>;
   getPayments(apiId: string, options?: { limit?: number; from?: string; cursor?: string }): Promise<ApiPaymentsResult>;
   getLogs(apiId: string, options?: { limit?: number; from?: string; cursor?: string }): Promise<ApiLogsResult>;
+
+  // Bridge
+  /**
+   * Get a bridge quote — fee and net output for a given USD amount.
+   * @param amount  Amount in USD (e.g. 10.0)
+   * @param from    Source network: 'solana' | 'skale-base' (default: 'solana')
+   */
+  getBridgeQuote(amount: number, from?: 'solana' | 'skale-base'): Promise<BridgeQuoteResult>;
+
+  /**
+   * Get current USDC liquidity on all bridge networks.
+   * Use this before bridging to confirm availability.
+   */
+  getBridgeBalances(): Promise<BridgeBalances>;
+
+  /**
+   * Bridge USDC from Solana to SKALE Base via x402 payment.
+   * This call returns HTTP 402 — pass a createX402Client instance to handle payment automatically.
+   *
+   * @param amount            Amount in USD
+   * @param destinationWallet EVM address on SKALE Base
+   * @param x402Client        A configured createX402Client instance for Solana
+   */
+  bridgeSolanaToSkale(
+    amount: number,
+    destinationWallet: string,
+    x402Client: { fetch(url: string, init?: RequestInit): Promise<Response> },
+  ): Promise<BridgeResult>;
+
+  /**
+   * Bridge USDC from SKALE Base to Solana via x402 payment.
+   *
+   * @param amount            Amount in USD
+   * @param destinationWallet Solana public key (base58)
+   * @param x402Client        A configured createX402Client instance for EVM/SKALE Base
+   */
+  bridgeSkaleToSolana(
+    amount: number,
+    destinationWallet: string,
+    x402Client: { fetch(url: string, init?: RequestInit): Promise<Response> },
+  ): Promise<BridgeResult>;
 }
 
 /**
@@ -261,6 +332,33 @@ export function createManagementClient(config: ManagementClientConfig): RelaiMan
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`[relai-mgmt] ${method} ${path} → ${res.status}: ${text}`);
+    }
+    return res.json() as Promise<T>;
+  }
+
+  async function bridgeReq<T>(
+    method: string,
+    path: string,
+    x402Client: { fetch(url: string, init?: RequestInit): Promise<Response> },
+    body?: unknown,
+  ): Promise<T> {
+    const res = await x402Client.fetch(`${base}${path}`, {
+      method,
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let parsed: Record<string, unknown> = {};
+      try { parsed = JSON.parse(text); } catch { /* ignore */ }
+      if (res.status === 503 && parsed['reason'] === 'insufficient_liquidity') {
+        const avail = parsed['available'] as number | undefined;
+        throw new Error(
+          `Bridge temporarily unavailable — insufficient liquidity` +
+          (avail != null ? ` (available: $${Number(avail).toFixed(2)} USDC)` : ''),
+        );
+      }
+      throw new Error(`[relai-bridge] ${method} ${path} → ${res.status}: ${text}`);
     }
     return res.json() as Promise<T>;
   }
@@ -321,6 +419,35 @@ export function createManagementClient(config: ManagementClientConfig): RelaiMan
       if (options.cursor) params.set('cursor', options.cursor);
       const qs = params.toString() ? `?${params}` : '';
       return req<ApiLogsResult>('GET', `/v1/apis/${apiId}/logs${qs}`);
+    },
+
+    // ── Bridge ──────────────────────────────────────────────────
+
+    getBridgeQuote(amount, from = 'solana') {
+      const params = new URLSearchParams({ amount: String(amount), from });
+      return req<BridgeQuoteResult>('GET', `/v1/bridge/quote?${params}`);
+    },
+
+    getBridgeBalances() {
+      return req<BridgeBalances>('GET', '/v1/bridge/balances');
+    },
+
+    async bridgeSolanaToSkale(amount, destinationWallet, x402Client) {
+      return bridgeReq<BridgeResult>(
+        'POST',
+        '/v1/bridge/solana-to-skale',
+        x402Client,
+        { amount, destinationWallet },
+      );
+    },
+
+    async bridgeSkaleToSolana(amount, destinationWallet, x402Client) {
+      return bridgeReq<BridgeResult>(
+        'POST',
+        '/v1/bridge/skale-to-solana',
+        x402Client,
+        { amount, destinationWallet },
+      );
     },
   };
 }

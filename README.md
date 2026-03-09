@@ -544,6 +544,118 @@ const mgmt = createManagementClient({ serviceKey });
 
 ---
 
+## x402 Bridge
+
+Bridge USDC between **Solana** and **SKALE Base** using the x402 protocol. The bridge uses a liquidity network model — instant payouts, no canonical bridge delays.
+
+> Requires a service key (`sk_live_...`). Get one via `bootstrapAgentKeySolana` or the RelAI dashboard.
+
+### How it works
+
+```
+Agent pays USDC on Solana (x402)
+  ↓ facilitator verifies payment
+Bridge pays out USDC on SKALE Base from its liquidity pool  ← instant
+  ↓ async in background
+Rebalance via Circle CCTP restores liquidity
+```
+
+### Quick start
+
+```typescript
+import { createManagementClient } from '@relai-fi/x402/management';
+import { createX402Client } from '@relai-fi/x402/client';
+import { Keypair } from '@solana/web3.js';
+
+const serviceKey = process.env.RELAI_SERVICE_KEY!;
+const mgmt = createManagementClient({ serviceKey });
+
+// 1. Check liquidity before bridging
+const balances = await mgmt.getBridgeBalances();
+console.log(`SKALE Base liquidity: $${balances.skaleBase.usd} USDC`);
+
+// 2. Get a quote
+const quote = await mgmt.getBridgeQuote(10.0, 'solana');
+// { inputUsd: 10, outputUsd: 9.99, feeBps: 10, direction: 'solana-to-skale' }
+
+// 3. Bridge Solana → SKALE Base
+const keypair = Keypair.fromSecretKey(Buffer.from(process.env.SOLANA_PRIVATE_KEY!, 'base64'));
+const solanaWallet = {
+  publicKey: keypair.publicKey,
+  signTransaction: async (tx: any) => { tx.sign([keypair]); return tx; },
+};
+
+const x402 = createX402Client({
+  wallets: { solana: solanaWallet },
+  solanaRpcUrl: process.env.SOLANA_RPC_URL,
+  defaultHeaders: { 'X-Service-Key': serviceKey },
+});
+
+const result = await mgmt.bridgeSolanaToSkale(
+  10.0,                    // $10 USDC
+  '0xYourSkaleAddress',    // destination EVM address on SKALE Base
+  x402,
+);
+// { success: true, txHash: '0x...', amountOutUsd: 9.99, explorerUrl: '...' }
+```
+
+### Bridge SKALE Base → Solana
+
+```typescript
+import { ethers } from 'ethers';
+
+const provider = new ethers.JsonRpcProvider(process.env.SKALE_RPC_URL);
+const signer = new ethers.Wallet(process.env.EVM_PRIVATE_KEY!, provider);
+
+const evmWallet = {
+  address: signer.address,
+  signTypedData: (params: any) => signer.signTypedData(
+    params.domain, params.types, params.message
+  ),
+};
+
+const x402 = createX402Client({
+  wallets: { evm: evmWallet },
+  defaultHeaders: { 'X-Service-Key': serviceKey },
+});
+
+const result = await mgmt.bridgeSkaleToSolana(
+  5.0,                        // $5 USDC
+  'YourSolanaPublicKey',      // destination Solana address (base58)
+  x402,
+);
+// { success: true, txHash: '...', amountOutUsd: 4.995, explorerUrl: '...' }
+```
+
+### Bridge API reference
+
+| Method | Description |
+|--------|-------------|
+| `getBridgeQuote(amount, from?)` | Fee and net output for a given amount |
+| `getBridgeBalances()` | Current USDC liquidity on Solana / SKALE Base / Base |
+| `bridgeSolanaToSkale(amount, dest, x402Client)` | Bridge Solana → SKALE Base |
+| `bridgeSkaleToSolana(amount, dest, x402Client)` | Bridge SKALE Base → Solana |
+
+### Error handling
+
+```typescript
+try {
+  const result = await mgmt.bridgeSolanaToSkale(100.0, '0x...', x402);
+} catch (err) {
+  if (err.message.includes('insufficient_liquidity')) {
+    // Bridge temporarily unavailable — check balances and retry later
+    const { skaleBase } = await mgmt.getBridgeBalances();
+    console.log(`Available: $${skaleBase.usd} USDC`);
+  }
+}
+```
+
+**Fee:** 0.1% (10 bps) deducted from output amount. Check `getBridgeQuote` for exact amounts.
+
+**Limits:** min $0.000001, max $10,000 per transaction.
+
+---
+
 ## Utilities
 
 ```typescript

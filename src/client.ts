@@ -8,6 +8,7 @@ import {
 import {
   getAssociatedTokenAddress,
   createTransferCheckedInstruction,
+  createAssociatedTokenAccountIdempotentInstruction,
   getMint,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
@@ -1159,12 +1160,21 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       programId,
     );
 
+    // Ensure destination ATA exists (idempotent — no-op if already exists)
+    const createDestAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+      feePayerPubkey,  // payer (feePayer covers this)
+      destinationAta,
+      merchantPubkey,
+      mintPubkey,
+      programId,
+    );
+
     // Build versioned transaction with feePayer
     const { blockhash } = await connection.getLatestBlockhash('confirmed');
     const message = new TransactionMessage({
       payerKey: feePayerPubkey,
       recentBlockhash: blockhash,
-      instructions: [transferIx],
+      instructions: [createDestAtaIx, transferIx],
     }).compileToV0Message();
 
     const transaction = new VersionedTransaction(message);

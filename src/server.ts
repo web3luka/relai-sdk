@@ -47,6 +47,8 @@ export interface ProtectOptions {
   integritas?: boolean | RelaiIntegritasOptions;
   /** Override network for this endpoint */
   network?: RelaiNetwork;
+  /** Override feePayer address (Solana only) — bypasses facilitator /supported fetch */
+  feePayer?: string;
   /** Custom validation after payment is settled */
   customRules?: (req: any) => boolean | Promise<boolean>;
   /** Callback when 402 is returned (no payment provided) */
@@ -562,8 +564,8 @@ export class Relai {
             resolvedPayTo = options.payTo as string;
           }
 
-          // Get facilitator feePayer address (cached)
-          const feePayer = await self.getFeePayer(caip2);
+          // Get facilitator feePayer address — use explicit override if provided, otherwise fetch
+          const feePayer = (options.feePayer as string | undefined) || await self.getFeePayer(caip2);
 
           return res.status(402).json({
             x402Version: 2,

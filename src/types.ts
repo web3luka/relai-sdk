@@ -14,6 +14,7 @@ export const RELAI_FACILITATOR_URL = 'https://facilitator.x402.fi';
 /** All networks supported by RelAI facilitator */
 export type RelaiNetwork =
   | 'solana'
+  | 'solana-devnet'
   | 'base'
   | 'avalanche'
   | 'skale-base'
@@ -26,6 +27,7 @@ export type RelaiNetwork =
 /** CAIP-2 network identifiers */
 export const NETWORK_CAIP2: Record<RelaiNetwork, string> = {
   'solana': 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+  'solana-devnet': 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
   'base': 'eip155:8453',
   'avalanche': 'eip155:43114',
   'skale-base': 'eip155:1187947933',
@@ -70,6 +72,14 @@ export const NETWORK_TOKENS: Partial<Record<RelaiNetwork, NetworkToken[]>> = {
       address: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
       symbol: 'USDC',
       name: 'USD Coin',
+      decimals: 6,
+    },
+  ],
+  'solana-devnet': [
+    {
+      address: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+      symbol: 'USDC',
+      name: 'USD Coin (Devnet)',
       decimals: 6,
     },
   ],
@@ -208,6 +218,7 @@ export function resolveToken(network: RelaiNetwork, asset?: string): NetworkToke
 /** USDC contract addresses per network */
 export const USDC_ADDRESSES: Record<RelaiNetwork, string> = {
   'solana': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  'solana-devnet': '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
   'base': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
   'avalanche': '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E',
   'skale-base': '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20',
@@ -221,6 +232,7 @@ export const USDC_ADDRESSES: Record<RelaiNetwork, string> = {
 /** Explorer URLs per network */
 export const EXPLORER_TX_URL: Record<RelaiNetwork, (tx: string) => string> = {
   'solana': (tx) => `https://solscan.io/tx/${tx}`,
+  'solana-devnet': (tx) => `https://solscan.io/tx/${tx}?cluster=devnet`,
   'base': (tx) => `https://basescan.org/tx/${tx}`,
   'avalanche': (tx) => `https://snowtrace.io/tx/${tx}`,
   'skale-base': (tx) => `https://skale-base-explorer.skalenodes.com/tx/${tx}`,
@@ -234,6 +246,7 @@ export const EXPLORER_TX_URL: Record<RelaiNetwork, (tx: string) => string> = {
 /** Human-readable network labels */
 export const NETWORK_LABELS: Record<RelaiNetwork, string> = {
   'solana': 'Solana',
+  'solana-devnet': 'Solana Devnet',
   'base': 'Base',
   'avalanche': 'Avalanche',
   'skale-base': 'SKALE Base',
@@ -255,6 +268,7 @@ export const USDC_BASE = USDC_ADDRESSES['base'];
 /** All supported RelAI networks list */
 export const RELAI_NETWORKS: RelaiNetwork[] = [
   'solana',
+  'solana-devnet',
   'base',
   'avalanche',
   'skale-base',
@@ -267,7 +281,7 @@ export const RELAI_NETWORKS: RelaiNetwork[] = [
 
 /** Check if a network is Solana-based */
 export function isSolana(network: string): boolean {
-  return network === 'solana' || network.startsWith('solana:');
+  return network === 'solana' || network === 'solana-devnet' || network.startsWith('solana:');
 }
 
 /** Check if a network is EVM-based */

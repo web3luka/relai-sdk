@@ -34,6 +34,13 @@ export type {
 // All types & constants
 export * from './types';
 
+// Management API (re-export bridge types for convenience)
+export type {
+  BridgeQuoteResult,
+  BridgeBalances,
+  BridgeResult,
+} from './management';
+
 // Utility re-exports
 export {
   convertV1ToV2,
