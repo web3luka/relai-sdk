@@ -811,6 +811,104 @@ export function createX402Client(config: X402ClientConfig): X402Client {
   }
 
   // -----------------------------------------------------------------------
+  // Bridge extension — cross-chain payment routing (x402 bridge spec)
+  // -----------------------------------------------------------------------
+
+  function getBridgeExtension(requirements: any): any | null {
+    const ext = requirements?.extensions?.bridge;
+    if (!ext?.info?.endpoint || !Array.isArray(ext.info.supportedSourceChains)) return null;
+    return ext.info;
+  }
+
+  function selectBridgeSource(bridge: any): { chain: 'solana' | 'evm'; network: string; asset: string } | null {
+    const sourceChains: string[] = bridge.supportedSourceChains || [];
+    const sourceAssets: string[] = bridge.supportedSourceAssets || [];
+    for (const caip2 of sourceChains) {
+      if (isSolana(caip2) && hasSolanaWallet) {
+        const asset = sourceAssets.find((a: string) => !a.startsWith('0x')) || '';
+        return { chain: 'solana', network: caip2, asset };
+      }
+      if (isEvm(caip2) && effectiveWallets.evm) {
+        const asset = sourceAssets.find((a: string) => a.startsWith('0x')) || '';
+        return { chain: 'evm', network: caip2, asset };
+      }
+    }
+    return null;
+  }
+
+  async function executeBridgePayment(
+    bridge: any,
+    accepts: any[],
+    requirements: any,
+    url: string,
+  ): Promise<string> {
+    const source = selectBridgeSource(bridge);
+    if (!source) {
+      throw new Error('[relai-x402] bridge extension found but no wallet matches supported source chains');
+    }
+
+    // Pick first accept as the target (merchant's preferred chain)
+    const targetAccept = accepts[0];
+    const amount = targetAccept.amount || targetAccept.maxAmountRequired;
+
+    log(`Bridge: ${source.network} → ${targetAccept.network}, amount=${amount}`);
+
+    // Amount guard
+    if (maxAmountAtomic && BigInt(amount) > BigInt(maxAmountAtomic)) {
+      throw new Error(`[relai-x402] Amount ${amount} exceeds max ${maxAmountAtomic}`);
+    }
+
+    // Build source-chain payment header (same logic as direct payment)
+    let sourcePaymentHeader: string;
+    if (source.chain === 'solana') {
+      // Build a synthetic accept entry for the source chain
+      const sourceAccept = {
+        ...targetAccept,
+        network: source.network,
+        asset: source.asset || targetAccept.asset,
+      };
+      sourcePaymentHeader = await buildSolanaPayment(sourceAccept, requirements, url);
+    } else {
+      const evmNetwork = normalizeNetwork(source.network);
+      const usePermit = evmNetwork && PERMIT_NETWORKS.has(evmNetwork);
+      const sourceAccept = {
+        ...targetAccept,
+        network: source.network,
+        asset: source.asset || targetAccept.asset,
+      };
+      sourcePaymentHeader = usePermit
+        ? await buildEvmPermitPayment(sourceAccept, requirements, url)
+        : await buildEvmPayment(sourceAccept, requirements, url);
+    }
+
+    // POST to bridge endpoint
+    const bridgeRes = await fetch(bridge.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourcePayment: sourcePaymentHeader,
+        sourceChain: source.network,
+        targetAccept,
+        requirements,
+        resource: url,
+      }),
+    });
+
+    if (!bridgeRes.ok) {
+      const err = await bridgeRes.json().catch(() => ({}));
+      throw new Error(`[relai-x402] bridge settle failed: ${err.error || bridgeRes.status}`);
+    }
+
+    const bridgeData = await bridgeRes.json();
+    if (!bridgeData.xPayment) {
+      throw new Error('[relai-x402] bridge endpoint did not return xPayment header');
+    }
+
+    log(`Bridge settled: sourceTx=${bridgeData.sourceTxId}, targetTx=${bridgeData.targetTxId}`);
+    return bridgeData.xPayment;
+  }
+
+  // -----------------------------------------------------------------------
   // JSON-RPC helper (for reading EVM contract state without ethers)
   // -----------------------------------------------------------------------
   async function evmRpcCall(rpcUrl: string, to: string, data: string): Promise<string> {
@@ -1412,6 +1510,17 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
     const selected = selectAccept(accepts);
     if (!selected) {
+      // Fallback: check bridge extension for cross-chain routing
+      const bridge = getBridgeExtension(requirements);
+      if (bridge && selectBridgeSource(bridge)) {
+        log('No direct wallet match — attempting bridge extension flow');
+        const paymentHeader = await executeBridgePayment(bridge, accepts, requirements, url);
+        log('Retrying with X-PAYMENT header (bridge)');
+        return fetch(input, {
+          ...requestInitWithHeaders,
+          headers: { ...requestHeaders, 'X-PAYMENT': paymentHeader },
+        });
+      }
       throw new Error(buildNoWalletError(accepts, false));
     }
 
