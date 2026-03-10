@@ -861,11 +861,23 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     // Build source-chain payment header (same logic as direct payment)
     let sourcePaymentHeader: string;
     if (source.chain === 'solana') {
-      // Build a synthetic accept entry for the source chain
+      // Build a synthetic accept entry for the source chain.
+      // payTo must be the bridge facilitator's Solana wallet (bridge.payTo),
+      // NOT the merchant's address (which may be an EVM address).
+      // feePayer comes from bridge.info — facilitator sponsors Solana gas.
+      if (!bridge.payTo) {
+        throw new Error('[relai-x402] bridge.info.payTo is required for Solana source payments');
+      }
       const sourceAccept = {
-        ...targetAccept,
+        scheme: 'svm-exact',
         network: source.network,
-        asset: source.asset || targetAccept.asset,
+        asset: source.asset,
+        payTo: bridge.payTo,
+        amount: targetAccept.amount || targetAccept.maxAmountRequired,
+        extra: {
+          ...(bridge.feePayer ? { feePayer: bridge.feePayer } : {}),
+          decimals: 6,
+        },
       };
       sourcePaymentHeader = await buildSolanaPayment(sourceAccept, requirements, url);
     } else {
@@ -875,6 +887,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
         ...targetAccept,
         network: source.network,
         asset: source.asset || targetAccept.asset,
+        ...(bridge.payTo ? { payTo: bridge.payTo } : {}),
       };
       sourcePaymentHeader = usePermit
         ? await buildEvmPermitPayment(sourceAccept, requirements, url)
