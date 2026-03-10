@@ -904,6 +904,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
         targetAccept,
         requirements,
         resource: url,
+        paymentFacilitator: bridge.paymentFacilitator || null,
       }),
     });
 
