@@ -174,6 +174,45 @@ const result = await response.json();
 
 ---
 
+### Crossmint Smart Wallet (server-side / agent)
+
+Use `createCrossmintX402Fetch` from `@relai-fi/x402/crossmint` — no `signTransaction` needed, Crossmint handles signing and broadcasting.
+
+```typescript
+import { createCrossmintX402Fetch } from '@relai-fi/x402/crossmint';
+import { Connection } from '@solana/web3.js';
+
+const fetch402 = createCrossmintX402Fetch({
+  apiKey: process.env.CROSSMINT_API_KEY!,   // sk_production_... or sk_staging_...
+  wallet: process.env.CROSSMINT_WALLET!,    // Crossmint smart wallet address
+  connection: new Connection(process.env.SOLANA_RPC_URL!),
+});
+
+// RelAI sponsors SOL gas — wallet only needs USDC
+const response = await fetch402('https://api.example.com/protected');
+const data = await response.json();
+```
+
+For agents that require explicit transaction approval before Crossmint broadcasts, use the **delegated mode** — an external Ed25519 signer must be registered on the Crossmint smart wallet:
+
+```typescript
+import { createCrossmintDelegatedX402Fetch } from '@relai-fi/x402/crossmint';
+import { Connection } from '@solana/web3.js';
+
+const fetch402 = createCrossmintDelegatedX402Fetch({
+  apiKey: process.env.CROSSMINT_API_KEY!,
+  wallet: process.env.CROSSMINT_WALLET!,
+  signerSecretKey: Buffer.from(process.env.SIGNER_SECRET_KEY!, 'base64'), // 64-byte Ed25519
+  connection: new Connection(process.env.SOLANA_RPC_URL!),
+});
+
+const response = await fetch402('https://api.example.com/protected');
+```
+
+> Both modes use Crossmint's API to sign and broadcast — no private key handling in your code.
+
+---
+
 ### WebSocket relay transport (optional)
 
 If your protected API is behind a relay URL like `https://api.relai.fi/relay/:apiId/...`
