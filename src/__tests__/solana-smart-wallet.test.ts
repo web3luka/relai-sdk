@@ -113,7 +113,7 @@ function build402Response(feePayer = '4x4ZhcqiT1FnirM8Ne97iVupkN4NcQgc2YYbE2jDZb
   const requirements = {
     accepts: [
       {
-        scheme: 'svm-exact',
+        scheme: 'exact',
         network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
         asset: MOCK_MINT_PUBKEY.toBase58(),
         payTo: MOCK_DEST_ATA.toBase58(),

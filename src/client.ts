@@ -869,7 +869,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
         throw new Error('[relai-x402] bridge.info.payTo is required for Solana source payments');
       }
       const sourceAccept = {
-        scheme: 'svm-exact',
+        scheme: 'exact',
         network: source.network,
         asset: source.asset,
         payTo: bridge.payTo,

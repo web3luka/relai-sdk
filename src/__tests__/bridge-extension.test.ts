@@ -118,7 +118,7 @@ function buildSolanaAccept402() {
   return {
     accepts: [
       {
-        scheme: 'svm-exact',
+        scheme: 'exact',
         network: SOLANA_CAIP2,
         asset: MOCK_MINT.toBase58(),
         payTo: MOCK_DEST_ATA.toBase58(),
