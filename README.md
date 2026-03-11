@@ -186,6 +186,7 @@ const fetch402 = createCrossmintX402Fetch({
   apiKey: process.env.CROSSMINT_API_KEY!,   // sk_production_... or sk_staging_...
   wallet: process.env.CROSSMINT_WALLET!,    // Crossmint smart wallet address
   connection: new Connection(process.env.SOLANA_RPC_URL!),
+  onPayment: (txHash) => console.log('On-chain tx:', txHash),
 });
 
 // RelAI sponsors SOL gas — wallet only needs USDC
