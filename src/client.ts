@@ -816,7 +816,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
   function getBridgeExtension(requirements: any): any | null {
     const ext = requirements?.extensions?.bridge;
-    if (!ext?.info?.endpoint || !Array.isArray(ext.info.supportedSourceChains)) return null;
+    if (!ext?.info?.settleEndpoint || !Array.isArray(ext.info.supportedSourceChains)) return null;
     return ext.info;
   }
 
@@ -875,7 +875,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
         payTo: bridge.payTo,
         amount: targetAccept.amount || targetAccept.maxAmountRequired,
         extra: {
-          ...(bridge.feePayer ? { feePayer: bridge.feePayer } : {}),
+          ...(bridge.feePayerSvm ? { feePayer: bridge.feePayerSvm } : {}),
           decimals: 6,
         },
       };
@@ -894,8 +894,8 @@ export function createX402Client(config: X402ClientConfig): X402Client {
         : await buildEvmPayment(sourceAccept, requirements, url);
     }
 
-    // POST to bridge endpoint
-    const bridgeRes = await fetch(bridge.endpoint, {
+    // POST to bridge settle endpoint
+    const bridgeRes = await fetch(bridge.settleEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

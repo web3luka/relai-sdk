@@ -84,11 +84,11 @@ function buildBaseOnly402WithBridge() {
       bridge: {
         info: {
           provider: 'relai',
-          endpoint: BRIDGE_ENDPOINT,
+          settleEndpoint: BRIDGE_ENDPOINT,
           supportedSourceChains: [SOLANA_CAIP2],
           supportedSourceAssets: [MOCK_MINT.toBase58()],
           payTo: MOCK_DEST_ATA.toBase58(),
-          feePayer: MOCK_FEE_PAYER,
+          feePayerSvm: MOCK_FEE_PAYER,
           feesBps: 30,
         },
         schema: {},
@@ -277,7 +277,7 @@ describe('Bridge extension — getBridgeExtension / selectBridgeSource', () => {
         bridge: {
           info: {
             provider: 'relai',
-            endpoint: BRIDGE_ENDPOINT,
+            settleEndpoint: BRIDGE_ENDPOINT,
             supportedSourceChains: ['eip155:43114'], // Avalanche only
             supportedSourceAssets: ['0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E'],
             feesBps: 30,
