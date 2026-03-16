@@ -755,3 +755,123 @@ export function shield(config?: ShieldPluginConfig): RelaiPlugin {
     },
   };
 }
+
+// ============================================================================
+// Preflight Plugin
+// ============================================================================
+
+export interface PreflightPluginConfig {
+  /**
+   * Base URL of the API server (e.g. 'https://my-api.com').
+   * The plugin appends the request path to form the probe URL.
+   * **Required** — the plugin needs to know where to send the probe.
+   */
+  baseUrl: string;
+  /** Timeout in ms for the preflight probe (default: 3000) */
+  timeoutMs?: number;
+  /** Cache the probe result for this many ms (default: 5000) */
+  cacheTtlMs?: number;
+  /** Custom unhealthy message (default: 'Endpoint not responding. Please try again later.') */
+  unhealthyMessage?: string;
+  /** HTTP status code when endpoint unreachable (default: 503) */
+  unhealthyStatus?: number;
+}
+
+/**
+ * Preflight plugin — verifies the specific endpoint responds before payment.
+ *
+ * Unlike Shield (global health check), Preflight probes the **actual endpoint**
+ * the buyer is requesting. It sends a HEAD request with `X-Preflight: true` —
+ * the Relai middleware responds 200 instantly without triggering payment.
+ * If the endpoint doesn't respond, the buyer gets 503 instead of 402.
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { preflight } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   plugins: [
+ *     preflight({ baseUrl: 'https://my-api.com' }),
+ *   ],
+ * });
+ *
+ * app.get('/api/data', relai.protect({
+ *   payTo: '0xYourWallet',
+ *   price: 0.01,
+ * }), (req, res) => {
+ *   res.json({ data: 'premium content' });
+ * });
+ * ```
+ */
+export function preflight(config: PreflightPluginConfig): RelaiPlugin {
+  const baseUrl = config.baseUrl.replace(/\/+$/, '');
+  const timeoutMs = config.timeoutMs ?? 3000;
+  const cacheTtl = config.cacheTtlMs ?? 5000;
+  const unhealthyMessage = config.unhealthyMessage ?? 'Endpoint not responding. Please try again later.';
+  const unhealthyStatus = config.unhealthyStatus ?? 503;
+
+  const cache = new Map<string, { ok: boolean; expiresAt: number }>();
+
+  async function probeEndpoint(path: string): Promise<boolean> {
+    const now = Date.now();
+    const cached = cache.get(path);
+    if (cached && cached.expiresAt > now) {
+      return cached.ok;
+    }
+
+    let ok = false;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+        const res = await fetch(url, {
+          method: 'HEAD',
+          headers: { 'X-Preflight': 'true' },
+          signal: controller.signal,
+        });
+        ok = res.ok;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      ok = false;
+    }
+
+    cache.set(path, { ok, expiresAt: now + cacheTtl });
+    return ok;
+  }
+
+  return {
+    name: 'preflight',
+
+    async onInit() {
+      // Probe the base URL on startup
+      const ok = await probeEndpoint('/');
+      console.log(`[relai:preflight] Initial probe ${baseUrl}: ${ok ? 'reachable ✓' : 'UNREACHABLE ✗'}`);
+    },
+
+    async beforePaymentCheck(_req, ctx): Promise<PluginResult> {
+      const path = ctx.path || '/';
+      const ok = await probeEndpoint(path);
+
+      if (!ok) {
+        return {
+          reject: true,
+          rejectStatus: unhealthyStatus,
+          rejectMessage: unhealthyMessage,
+          headers: {
+            'X-Preflight-Status': 'unreachable',
+            'Retry-After': String(Math.ceil(cacheTtl / 1000)),
+          },
+        };
+      }
+
+      return {
+        headers: { 'X-Preflight-Status': 'ok' },
+      };
+    },
+  };
+}

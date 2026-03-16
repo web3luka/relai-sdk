@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Relai from '../server';
-import { freeTier, shield } from '../plugins';
+import { freeTier, shield, preflight } from '../plugins';
 import type { RelaiPlugin, PluginContext } from '../plugins';
 
 // ============================================================================
@@ -829,6 +829,180 @@ describe('shield() plugin', () => {
         }),
       );
       expect(next).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// ============================================================================
+// preflight() plugin unit tests
+// ============================================================================
+
+describe('preflight() plugin', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  const ctx: PluginContext = {
+    network: 'base',
+    price: 0.01,
+    path: '/api/data',
+    method: 'GET',
+  };
+
+  it('has correct name', () => {
+    const plugin = preflight({ baseUrl: 'https://my-api.com' });
+    expect(plugin.name).toBe('preflight');
+  });
+
+  it('has beforePaymentCheck and onInit hooks', () => {
+    const plugin = preflight({ baseUrl: 'https://my-api.com' });
+    expect(typeof plugin.beforePaymentCheck).toBe('function');
+    expect(typeof plugin.onInit).toBe('function');
+  });
+
+  describe('endpoint reachable', () => {
+    it('returns ok when endpoint responds 200', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true });
+
+      const plugin = preflight({ baseUrl: 'https://my-api.com', cacheTtlMs: 0 });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBeUndefined();
+      expect(result.headers?.['X-Preflight-Status']).toBe('ok');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://my-api.com/api/data',
+        expect.objectContaining({
+          method: 'HEAD',
+          headers: { 'X-Preflight': 'true' },
+        }),
+      );
+    });
+  });
+
+  describe('endpoint unreachable', () => {
+    it('returns reject when endpoint responds 500', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+
+      const plugin = preflight({ baseUrl: 'https://my-api.com', cacheTtlMs: 0 });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBe(true);
+      expect(result.rejectStatus).toBe(503);
+      expect(result.headers?.['X-Preflight-Status']).toBe('unreachable');
+    });
+
+    it('returns reject when fetch throws (network error)', async () => {
+      mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+      const plugin = preflight({ baseUrl: 'https://my-api.com', cacheTtlMs: 0 });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBe(true);
+      expect(result.headers?.['Retry-After']).toBeDefined();
+    });
+
+    it('uses custom unhealthyMessage and unhealthyStatus', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false });
+
+      const plugin = preflight({
+        baseUrl: 'https://my-api.com',
+        cacheTtlMs: 0,
+        unhealthyMessage: 'API is down',
+        unhealthyStatus: 502,
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBe(true);
+      expect(result.rejectStatus).toBe(502);
+      expect(result.rejectMessage).toBe('API is down');
+    });
+  });
+
+  describe('per-path probing', () => {
+    it('probes the correct path from ctx', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true });
+
+      const plugin = preflight({ baseUrl: 'https://my-api.com', cacheTtlMs: 0 });
+      const req = mockReq();
+      await plugin.beforePaymentCheck!(req, { ...ctx, path: '/v2/premium' });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://my-api.com/v2/premium',
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('caching', () => {
+    it('caches probe result per path within TTL', async () => {
+      mockFetch.mockResolvedValue({ ok: true });
+
+      const plugin = preflight({ baseUrl: 'https://my-api.com', cacheTtlMs: 60000 });
+      const req = mockReq();
+
+      await plugin.beforePaymentCheck!(req, ctx);
+      await plugin.beforePaymentCheck!(req, ctx);
+      await plugin.beforePaymentCheck!(req, ctx);
+
+      // Only one fetch call (cached)
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('probes separately for different paths', async () => {
+      mockFetch.mockResolvedValue({ ok: true });
+
+      const plugin = preflight({ baseUrl: 'https://my-api.com', cacheTtlMs: 60000 });
+      const req = mockReq();
+
+      await plugin.beforePaymentCheck!(req, { ...ctx, path: '/a' });
+      await plugin.beforePaymentCheck!(req, { ...ctx, path: '/b' });
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('integration with Relai.protect()', () => {
+    it('rejects request with 503 when endpoint unreachable', async () => {
+      mockFetch.mockResolvedValue({ ok: false, status: 500 });
+
+      const middleware = createProtectedMiddleware([
+        preflight({
+          baseUrl: 'https://my-api.com',
+          cacheTtlMs: 0,
+        }),
+      ]);
+
+      const req = mockReq();
+      const res = mockRes();
+      const next = mockNext();
+
+      await middleware(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.stringContaining('Endpoint not responding'),
+          plugin: 'preflight',
+        }),
+      );
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it('responds 200 to X-Preflight header (server-side handling)', async () => {
+      const middleware = createProtectedMiddleware([]);
+
+      const req = mockReq({ headers: { 'x-preflight': 'true' } });
+      const res = mockRes();
+      const next = mockNext();
+
+      await middleware(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ status: 'ok', preflight: true });
     });
   });
 });

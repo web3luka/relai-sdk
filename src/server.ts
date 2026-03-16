@@ -490,6 +490,14 @@ export class Relai {
 
     return async (req: any, res: any, next: any) => {
       try {
+        // -----------------------------------------------------------
+        // Preflight probe: respond 200 immediately so the preflight
+        // plugin (or external clients) can verify the endpoint is alive.
+        // -----------------------------------------------------------
+        if (req.headers['x-preflight'] === 'true' || req.headers['x-preflight'] === '1') {
+          return res.status(200).json({ status: 'ok', preflight: true });
+        }
+
         // Resolve dynamic price
         const resolvedPrice = typeof options.price === 'function'
           ? await options.price(req)
