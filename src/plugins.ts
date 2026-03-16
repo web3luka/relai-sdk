@@ -1,6 +1,7 @@
 // src/plugins.ts
 // RelAI Plugin System - extensible middleware hooks for Relai.protect()
 
+import crypto from 'crypto';
 import type { RelaiNetwork } from './types';
 import type { SettleResult } from './server';
 
@@ -64,12 +65,12 @@ export interface RelaiPlugin {
 // ============================================================================
 
 export interface FreeTierPluginConfig {
-  /** Service key (sk_live_...) for authenticating with RelAI API */
-  serviceKey: string;
+  /** Service key (sk_live_...) for syncing with RelAI backend. If omitted, runs in local in-memory mode. */
+  serviceKey?: string;
   /** Max free calls per buyer per period */
   perBuyerLimit: number;
   /** Reset period for per-buyer counters */
-  resetPeriod?: 'never' | 'daily' | 'monthly';
+  resetPeriod?: 'none' | 'daily' | 'monthly';
   /** Optional global cap across all buyers */
   globalCap?: number;
   /** Specific paths to apply free tier to (default: '*' = all) */
@@ -124,6 +125,8 @@ interface FreeTierCheckResponse {
 // ============================================================================
 
 export interface BridgePluginConfig {
+  /** Service key (sk_live_...) for tracking bridge usage per API owner */
+  serviceKey?: string;
   /** RelAI API base URL (default: https://api.relai.fi) */
   baseUrl?: string;
   /** Override settle endpoint (auto-discovered from /bridge/info if not set) */
@@ -184,6 +187,13 @@ interface BridgeInfo {
 export function bridge(config?: BridgePluginConfig): RelaiPlugin {
   const base = (config?.baseUrl ?? RELAI_API_BASE).replace(/\/$/, '');
   let bridgeInfo: BridgeInfo | null = null;
+
+  // Hash service key for tracking (never expose raw key to clients)
+  // Must match backend: crypto.createHash("sha256").update(key).digest("hex").slice(0, 16)
+  let serviceKeyHash: string | null = null;
+  if (config?.serviceKey) {
+    serviceKeyHash = crypto.createHash('sha256').update(config.serviceKey).digest('hex').slice(0, 16);
+  }
 
   async function fetchBridgeInfo(): Promise<BridgeInfo | null> {
     try {
@@ -256,6 +266,7 @@ export function bridge(config?: BridgePluginConfig): RelaiPlugin {
           feePayerSvm: bridgeInfo.feePayerSvm,
           feeBps: bridgeInfo.feeBps,
           paymentFacilitator: bridgeInfo.paymentFacilitator,
+          ...(serviceKeyHash ? { serviceKeyHash } : {}),
         },
       };
 
@@ -268,19 +279,44 @@ export function bridge(config?: BridgePluginConfig): RelaiPlugin {
 // Free Tier Plugin
 // ============================================================================
 
-export function freeTier(config: FreeTierPluginConfig): RelaiPlugin {
+/**
+ * Extended plugin interface with data export for free tier.
+ */
+export interface FreeTierPlugin extends RelaiPlugin {
+  /** Export all in-memory usage data (local mode only). Returns null when using cloud mode. */
+  getUsageData(): FreeTierUsageExport | null;
+  /** Whether plugin is running in local (in-memory) or cloud (RelAI backend) mode. */
+  readonly mode: 'local' | 'cloud';
+}
+
+export interface FreeTierUsageExport {
+  mode: 'local';
+  config: {
+    perBuyerLimit: number;
+    resetPeriod: string;
+    globalCap: number | null;
+    paths: string[];
+  };
+  /** Per-buyer usage entries */
+  usage: Array<{
+    buyerId: string;
+    path: string;
+    count: number;
+    periodStart: string;
+    lastCall: string;
+  }>;
+  globalCount: number;
+  exportedAt: string;
+}
+
+export function freeTier(config: FreeTierPluginConfig): FreeTierPlugin {
   const base = (config.baseUrl ?? RELAI_API_BASE).replace(/\/$/, '');
   const cacheTtl = config.cacheTtlMs ?? 5000;
-
-  // Simple in-memory cache: "serviceKey:path:buyerId" -> { result, expiresAt }
-  const cache = new Map<string, { result: FreeTierCheckResponse; expiresAt: number }>();
-
-  function resolveHeaders(): Record<string, string> {
-    return {
-      'X-Service-Key': config.serviceKey,
-      'Content-Type': 'application/json',
-    };
-  }
+  const isLocal = !config.serviceKey;
+  const resetPeriod = config.resetPeriod ?? 'none';
+  const limit = config.perBuyerLimit;
+  const globalCap = config.globalCap ?? null;
+  const pluginPaths = config.paths ?? ['*'];
 
   /**
    * Resolve buyer identity from the request.
@@ -310,12 +346,135 @@ export function freeTier(config: FreeTierPluginConfig): RelaiPlugin {
     return `ip:${ip}`;
   }
 
-  function cacheKey(path: string, buyerId: string): string {
+  function pathMatches(requestPath: string): boolean {
+    return pluginPaths.includes('*') || pluginPaths.some((p) => {
+      const normalized = p.toLowerCase().replace(/\/+$/, '') || '/';
+      const reqNormalized = requestPath.toLowerCase().replace(/\/+$/, '') || '/';
+      return normalized === reqNormalized || normalized === '*';
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOCAL IN-MEMORY MODE
+  // ---------------------------------------------------------------------------
+
+  interface LocalUsageEntry {
+    count: number;
+    periodStart: string;
+    lastCall: string;
+  }
+
+  // Map key: "path:buyerId"
+  const localUsage = new Map<string, LocalUsageEntry>();
+  let localGlobalCount = 0;
+
+  function currentPeriodStart(): string {
+    const now = new Date();
+    if (resetPeriod === 'daily') {
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    }
+    if (resetPeriod === 'monthly') {
+      return new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    }
+    return 'none'; // permanent
+  }
+
+  function isCurrentPeriod(entry: LocalUsageEntry): boolean {
+    if (resetPeriod === 'none') return true;
+    return entry.periodStart === currentPeriodStart();
+  }
+
+  function localKey(path: string, buyerId: string): string {
+    return `${path}:${buyerId}`;
+  }
+
+  function localCheck(path: string, buyerId: string): FreeTierCheckResponse {
+    const key = localKey(path, buyerId);
+    const entry = localUsage.get(key);
+
+    // If entry is from a previous period, it's stale — treat as 0
+    const count = (entry && isCurrentPeriod(entry)) ? entry.count : 0;
+    const remaining = Math.max(0, limit - count);
+
+    // Global cap check
+    if (globalCap != null && localGlobalCount >= globalCap) {
+      return { free: false, remaining: 0, total: limit, reason: 'global_cap_reached', globalRemaining: 0 };
+    }
+
+    if (count >= limit) {
+      return { free: false, remaining: 0, total: limit, reason: 'limit_reached' };
+    }
+
+    return {
+      free: true,
+      remaining: remaining - 1, // after this call
+      total: limit,
+      ...(globalCap != null ? { globalRemaining: globalCap - localGlobalCount - 1 } : {}),
+    };
+  }
+
+  function localRecord(path: string, buyerId: string): void {
+    const key = localKey(path, buyerId);
+    const period = currentPeriodStart();
+    const entry = localUsage.get(key);
+    const now = new Date().toISOString();
+
+    if (entry && isCurrentPeriod(entry)) {
+      entry.count++;
+      entry.lastCall = now;
+    } else {
+      localUsage.set(key, { count: 1, periodStart: period, lastCall: now });
+    }
+    localGlobalCount++;
+  }
+
+  function exportLocalData(): FreeTierUsageExport {
+    const usage: FreeTierUsageExport['usage'] = [];
+    for (const [key, entry] of localUsage.entries()) {
+      // key format is "path:buyerId" but buyerId itself can contain ':'
+      // We stored it as `${path}:${buyerId}` where path starts with '/'
+      // So we find the first ':' after the path portion
+      const firstSlash = key.indexOf('/');
+      const colonAfterPath = key.indexOf(':', firstSlash > -1 ? firstSlash : 0);
+      const path = colonAfterPath > -1 ? key.slice(0, colonAfterPath) : key;
+      const buyerId = colonAfterPath > -1 ? key.slice(colonAfterPath + 1) : 'unknown';
+      usage.push({
+        buyerId,
+        path,
+        count: entry.count,
+        periodStart: entry.periodStart,
+        lastCall: entry.lastCall,
+      });
+    }
+    return {
+      mode: 'local',
+      config: { perBuyerLimit: limit, resetPeriod, globalCap, paths: pluginPaths },
+      usage,
+      globalCount: localGlobalCount,
+      exportedAt: new Date().toISOString(),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // CLOUD MODE (original — requires serviceKey)
+  // ---------------------------------------------------------------------------
+
+  // Simple in-memory cache: "serviceKey:path:buyerId" -> { result, expiresAt }
+  const cache = new Map<string, { result: FreeTierCheckResponse; expiresAt: number }>();
+
+  function resolveHeaders(): Record<string, string> {
+    return {
+      'X-Service-Key': config.serviceKey!,
+      'Content-Type': 'application/json',
+    };
+  }
+
+  function cloudCacheKey(path: string, buyerId: string): string {
     return `${config.serviceKey}:${path}:${buyerId}`;
   }
 
   async function checkFreeTier(path: string, buyerId: string): Promise<FreeTierCheckResponse> {
-    const key = cacheKey(path, buyerId);
+    const key = cloudCacheKey(path, buyerId);
     const now = Date.now();
     const cached = cache.get(key);
     if (cached && cached.expiresAt > now) {
@@ -351,7 +510,7 @@ export function freeTier(config: FreeTierPluginConfig): RelaiPlugin {
         body: JSON.stringify({ path, buyerId }),
       });
       // Invalidate cache for this buyer+path after recording
-      cache.delete(cacheKey(path, buyerId));
+      cache.delete(cloudCacheKey(path, buyerId));
     } catch {
       // Fire-and-forget
     }
@@ -371,15 +530,14 @@ export function freeTier(config: FreeTierPluginConfig): RelaiPlugin {
         }
       }
 
-      const paths = config.paths ?? ['*'];
       await fetch(`${base}/v1/plugins/free-tier/config`, {
         method: 'PUT',
         headers: resolveHeaders(),
         body: JSON.stringify({
           perBuyerLimit: config.perBuyerLimit,
-          resetPeriod: config.resetPeriod ?? 'never',
+          resetPeriod: config.resetPeriod ?? 'none',
           globalCap: config.globalCap ?? null,
-          paths,
+          paths: pluginPaths,
         }),
       });
     } catch (err) {
@@ -387,29 +545,55 @@ export function freeTier(config: FreeTierPluginConfig): RelaiPlugin {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Plugin instance
+  // ---------------------------------------------------------------------------
+
   return {
     name: 'free-tier',
+    mode: isLocal ? 'local' : 'cloud',
+
+    getUsageData(): FreeTierUsageExport | null {
+      if (!isLocal) return null;
+      return exportLocalData();
+    },
 
     async onInit() {
+      if (isLocal) {
+        console.log(`[relai:freeTier] Running in local mode (in-memory). perBuyerLimit=${limit}, resetPeriod=${resetPeriod}`);
+        return;
+      }
       await syncConfig();
     },
 
     async beforePaymentCheck(req, ctx) {
       const requestPath = ctx.path || '/';
+      if (!pathMatches(requestPath)) return {};
 
-      // Check if this path is covered by the plugin
-      const paths = config.paths ?? ['*'];
-      const pathMatches = paths.includes('*') || paths.some((p) => {
-        const normalized = p.toLowerCase().replace(/\/+$/, '') || '/';
-        const reqNormalized = requestPath.toLowerCase().replace(/\/+$/, '') || '/';
-        return normalized === reqNormalized || normalized === '*';
-      });
+      const buyerId = resolveBuyerId(req);
 
-      if (!pathMatches) {
+      // ── Local mode ──
+      if (isLocal) {
+        const result = localCheck(requestPath, buyerId);
+        if (result.free) {
+          localRecord(requestPath, buyerId);
+          return {
+            skip: true,
+            headers: {
+              'X-Free-Calls-Remaining': String(result.remaining ?? 0),
+              'X-Free-Calls-Total': String(result.total ?? limit),
+              ...(result.globalRemaining != null
+                ? { 'X-Free-Calls-Global-Remaining': String(result.globalRemaining) }
+                : {}),
+              'X-Free-Tier-Mode': 'local',
+            },
+            meta: { freeTier: true, buyerId, remaining: result.remaining, total: result.total ?? limit, mode: 'local' },
+          };
+        }
         return {};
       }
 
-      const buyerId = resolveBuyerId(req);
+      // ── Cloud mode ──
       const result = await checkFreeTier(requestPath, buyerId);
 
       if (result.free) {

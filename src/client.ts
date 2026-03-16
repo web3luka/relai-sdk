@@ -905,6 +905,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
         requirements,
         resource: url,
         paymentFacilitator: bridge.paymentFacilitator || null,
+        ...(bridge.serviceKeyHash ? { serviceKeyHash: bridge.serviceKeyHash } : {}),
       }),
     });
 
