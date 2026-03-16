@@ -9,6 +9,7 @@ export default defineConfig({
     'src/react/index.ts',
     'src/utils/index.ts',
     'src/management.ts',
+    'src/plugins.ts',
   ],
   format: ['cjs', 'esm'],
   dts: true,

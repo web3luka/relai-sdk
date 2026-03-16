@@ -31,6 +31,14 @@ export type {
   RelayWebSocketLike,
 } from './client';
 
+// Plugin types (runtime exports via '@relai-fi/x402/plugins')
+export type {
+  RelaiPlugin,
+  PluginContext,
+  PluginResult,
+  FreeTierPluginConfig,
+} from './plugins';
+
 // All types & constants
 export * from './types';
 

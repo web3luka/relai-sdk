@@ -340,6 +340,9 @@ import {
   fromAtomicUnits,
 } from '@relai-fi/x402/utils';
 
+// Plugins — extend protect() with free tier, custom logic
+import { freeTier } from '@relai-fi/x402/plugins';
+
 // Management API — create/manage APIs, pricing, analytics, agent bootstrap
 import {
   createManagementClient,
@@ -505,6 +508,105 @@ app.get('/api/solana-data', relai.protect({
 | `payer` | `string` | Payer wallet address |
 | `network` | `string` | Network name (e.g., `base`) |
 | `amount` | `number` | Price in USD |
+
+---
+
+## Plugins
+
+Extend `Relai.protect()` with plugins that run before payment checks. Plugins can skip payment (e.g. free tier), add headers, or attach metadata to requests.
+
+### Free Tier Plugin
+
+Allow buyers to make free API calls before requiring x402 payment. Usage is tracked per buyer (by JWT `sub`, wallet address, or IP) with optional global caps and periodic resets.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { freeTier } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'base',
+  plugins: [
+    freeTier({
+      serviceKey: process.env.RELAI_SERVICE_KEY!,
+      perBuyerLimit: 10,        // 10 free calls per buyer
+      resetPeriod: 'daily',     // reset daily (or 'monthly', 'never')
+      globalCap: 1000,          // optional: max 1000 free calls total
+      paths: ['*'],             // optional: apply to all endpoints (default)
+    }),
+  ],
+});
+
+app.get('/api/data', relai.protect({
+  payTo: '0xYourWallet',
+  price: 0.01,
+}), (req, res) => {
+  if (req.x402Free) {
+    // Free tier call — no payment was made
+    console.log('Free call from:', req.x402Plugin);
+  }
+  res.json({ data: 'content' });
+});
+```
+
+**How it works:**
+1. On server start, the plugin syncs its config to the RelAI backend via your service key.
+2. On each request, `beforePaymentCheck` asks the RelAI API if the buyer has free calls remaining.
+3. If free → `next()` is called without payment, `req.x402Free = true`, and usage is recorded.
+4. If exhausted → normal x402 payment flow continues.
+
+**Free Tier config:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `serviceKey` | `string` | **required** | Your RelAI service key (`sk_live_...`) |
+| `perBuyerLimit` | `number` | **required** | Free calls each buyer gets per period |
+| `resetPeriod` | `'never' \| 'daily' \| 'monthly'` | `'never'` | When counters reset |
+| `globalCap` | `number` | — | Max total free calls across all buyers |
+| `paths` | `string[]` | `['*']` | Which endpoints the free tier applies to |
+| `baseUrl` | `string` | `https://api.relai.fi` | RelAI API URL (override for testing) |
+
+**Request properties set on free-tier bypass:**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `req.x402Free` | `boolean` | `true` when request was served for free |
+| `req.x402Paid` | `boolean` | `false` on free tier, `true` on paid |
+| `req.x402Plugin` | `string` | Plugin name that granted the bypass (`'freeTier'`) |
+| `req.pluginMeta` | `object` | `{ freeTier: true, remaining: number }` |
+
+**Dashboard:** Manage plugin config and view usage in the RelAI dashboard under **SDK Plugins**.
+
+### Custom Plugins
+
+```typescript
+import type { RelaiPlugin } from '@relai-fi/x402';
+
+const myPlugin: RelaiPlugin = {
+  name: 'myPlugin',
+  beforePaymentCheck: async (ctx) => {
+    if (ctx.req.headers['x-vip'] === 'true') {
+      return { skip: true, reason: 'VIP bypass' };
+    }
+    return {};
+  },
+};
+
+const relai = new Relai({
+  network: 'base',
+  plugins: [myPlugin],
+});
+```
+
+**Plugin interface:**
+
+```typescript
+interface RelaiPlugin {
+  name: string;
+  beforePaymentCheck?: (ctx: PluginContext) => Promise<PluginResult>;
+  afterSettled?: (ctx: PluginContext) => Promise<void>;
+  onInit?: (config: RelaiServerConfig) => Promise<void>;
+}
+```
 
 ---
 

@@ -7,6 +7,7 @@ import {
   type NetworkToken,
   type RelaiNetwork,
 } from './types';
+import type { RelaiPlugin, PluginContext, PluginResult } from './plugins';
 
 // ============================================================================
 // Types
@@ -17,6 +18,8 @@ export interface RelaiServerConfig {
   network: RelaiNetwork;
   /** RelAI facilitator URL (default: https://facilitator.x402.fi) */
   facilitatorUrl?: string;
+  /** Plugins to extend protect() behavior (e.g. freeTier, rateLimit) */
+  plugins?: RelaiPlugin[];
 }
 
 export type DynamicPrice = number | ((req: any) => number | Promise<number>);
@@ -413,10 +416,34 @@ export class Relai {
   private network: RelaiNetwork;
   private facilitatorUrl: string;
   private feePayerCache: Map<string, string> = new Map(); // Cache feePayer per network
+  private plugins: RelaiPlugin[];
+  private pluginsInitialized = false;
 
   constructor(config: RelaiServerConfig) {
     this.network = config.network;
     this.facilitatorUrl = config.facilitatorUrl || RELAI_FACILITATOR_URL;
+    this.plugins = config.plugins ?? [];
+
+    // Fire-and-forget plugin init (sync config to backend, etc.)
+    if (this.plugins.length > 0) {
+      this.initPlugins().catch((err) => {
+        console.warn('[Relai] Plugin initialization error (non-blocking):', err);
+      });
+    }
+  }
+
+  private async initPlugins(): Promise<void> {
+    if (this.pluginsInitialized) return;
+    for (const plugin of this.plugins) {
+      if (plugin.onInit) {
+        try {
+          await plugin.onInit();
+        } catch (err) {
+          console.warn(`[Relai] Plugin '${plugin.name}' init failed:`, err);
+        }
+      }
+    }
+    this.pluginsInitialized = true;
   }
 
   /**
@@ -544,6 +571,42 @@ export class Relai {
           req.headers['x-payment'] ||
           req.headers['payment-signature'] ||
           req.headers['x-payment-signature'];
+
+        // -----------------------------------------------------------
+        // Plugin hooks: beforePaymentCheck
+        // If any plugin returns { skip: true }, bypass payment entirely.
+        // -----------------------------------------------------------
+        if (!paymentHeader && self.plugins.length > 0) {
+          const pluginCtx: PluginContext = {
+            network,
+            price: resolvedPrice,
+            path: req.path || req.originalUrl || '/',
+            method: (req.method || 'GET').toUpperCase(),
+          };
+
+          for (const plugin of self.plugins) {
+            if (!plugin.beforePaymentCheck) continue;
+            try {
+              const pluginResult = await plugin.beforePaymentCheck(req, pluginCtx);
+              if (pluginResult?.skip) {
+                // Set plugin-provided headers
+                if (pluginResult.headers) {
+                  for (const [k, v] of Object.entries(pluginResult.headers)) {
+                    res.setHeader(k, v);
+                  }
+                }
+                // Attach plugin metadata to request
+                req.pluginMeta = { ...(req.pluginMeta || {}), ...(pluginResult.meta || {}) };
+                req.x402Paid = false;
+                req.x402Free = true;
+                req.x402Plugin = plugin.name;
+                return next();
+              }
+            } catch (pluginErr) {
+              console.warn(`[Relai] Plugin '${plugin.name}' beforePaymentCheck error (non-blocking):`, pluginErr);
+            }
+          }
+        }
 
         // -----------------------------------------------------------
         // No payment → return 402 Payment Required
@@ -716,6 +779,24 @@ export class Relai {
         );
 
         options.onPaymentSettled?.(req, result);
+
+        // Plugin hooks: afterSettled
+        if (self.plugins.length > 0) {
+          const settleCtx: PluginContext = {
+            network,
+            price: resolvedPrice,
+            path: req.path || req.originalUrl || '/',
+            method: (req.method || 'GET').toUpperCase(),
+          };
+          for (const plugin of self.plugins) {
+            if (!plugin.afterSettled) continue;
+            try {
+              await plugin.afterSettled(req, result, settleCtx);
+            } catch (pluginErr) {
+              console.warn(`[Relai] Plugin '${plugin.name}' afterSettled error (non-blocking):`, pluginErr);
+            }
+          }
+        }
 
         // Custom validation after payment
         if (options.customRules) {
