@@ -708,7 +708,7 @@ export class Relai {
         // Build payment requirements for facilitator
         const paymentRequirements = {
           scheme: 'exact',
-          network,
+          network: caip2,
           amount,
           asset,
           payTo: settlePayTo,
