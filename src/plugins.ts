@@ -204,6 +204,18 @@ export function freeTier(config: FreeTierPluginConfig): RelaiPlugin {
 
   async function syncConfig(): Promise<void> {
     try {
+      // Check if config already exists on backend — don't overwrite dashboard-managed configs
+      const existing = await fetch(`${base}/v1/plugins/free-tier/config`, {
+        method: 'GET',
+        headers: resolveHeaders(),
+      });
+      if (existing.ok) {
+        const data = await existing.json();
+        if (data.configs && data.configs.length > 0) {
+          return; // Config managed via dashboard or previous sync — skip
+        }
+      }
+
       const paths = config.paths ?? ['*'];
       await fetch(`${base}/v1/plugins/free-tier/config`, {
         method: 'PUT',
