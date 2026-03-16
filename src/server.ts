@@ -713,16 +713,16 @@ export class Relai {
           asset,
           payTo: settlePayTo,
           maxTimeoutSeconds: options.maxTimeoutSeconds || 60,
-          ...(integritasEnabled
-            ? {
-                extra: {
-                  integritasEnabled: true,
-                  ...(integritasFlow ? { integritasFlow } : {}),
-                  ...(integritasMode ? { integritasMode } : {}),
-                  ...(integritasFlow === 'single' ? { integritasSingleSignature: true } : {}),
-                },
-              }
-            : {}),
+          extra: {
+            name: tokenName,
+            version: tokenVersion,
+            decimals: tokenDecimals,
+            symbol: token.symbol,
+            ...(integritasEnabled ? { integritasEnabled: true } : {}),
+            ...(integritasFlow ? { integritasFlow } : {}),
+            ...(integritasMode ? { integritasMode } : {}),
+            ...(integritasFlow === 'single' ? { integritasSingleSignature: true } : {}),
+          },
         };
 
         // Call facilitator /settle
