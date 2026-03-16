@@ -875,3 +875,366 @@ export function preflight(config: PreflightPluginConfig): RelaiPlugin {
     },
   };
 }
+
+
+// ============================================================================
+// Circuit Breaker Plugin
+// ============================================================================
+
+export type CircuitState = 'closed' | 'open' | 'half-open';
+
+export interface CircuitBreakerPluginConfig {
+  /**
+   * Number of consecutive failures before the circuit opens.
+   * Default: 5
+   */
+  failureThreshold?: number;
+  /**
+   * Time in ms the circuit stays open before moving to half-open.
+   * Default: 30000 (30 seconds)
+   */
+  resetTimeMs?: number;
+  /**
+   * Number of successful requests in half-open state before closing the circuit.
+   * Default: 2
+   */
+  halfOpenSuccesses?: number;
+  /** HTTP status code when circuit is open (default: 503) */
+  openStatus?: number;
+  /** Error message when circuit is open */
+  openMessage?: string;
+  /**
+   * HTTP status codes considered as failures.
+   * Default: [500, 502, 503, 504]
+   */
+  failureCodes?: number[];
+  /**
+   * Track failures globally or per-path.
+   * Default: 'per-path'
+   */
+  scope?: 'global' | 'per-path';
+}
+
+interface CircuitEntry {
+  state: CircuitState;
+  failures: number;
+  successes: number;
+  lastFailureAt: number;
+}
+
+/**
+ * Circuit Breaker plugin — tracks failure history and opens the circuit
+ * after repeated failures, preventing buyers from paying for broken endpoints.
+ *
+ * Unlike Shield/Preflight (real-time probes), Circuit Breaker is **zero-latency** —
+ * it makes no additional HTTP requests. Instead, it tracks `afterSettled` outcomes
+ * and rejects requests when the failure rate exceeds the threshold.
+ *
+ * States:
+ * - **closed** — normal operation, requests flow through
+ * - **open** — too many failures, requests are rejected with 503
+ * - **half-open** — after resetTime, allows a few test requests through
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { circuitBreaker } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   plugins: [
+ *     circuitBreaker({ failureThreshold: 5, resetTimeMs: 30000 }),
+ *   ],
+ * });
+ * ```
+ */
+export function circuitBreaker(config?: CircuitBreakerPluginConfig): RelaiPlugin {
+  const failureThreshold = config?.failureThreshold ?? 5;
+  const resetTimeMs = config?.resetTimeMs ?? 30000;
+  const halfOpenSuccesses = config?.halfOpenSuccesses ?? 2;
+  const openStatus = config?.openStatus ?? 503;
+  const openMessage = config?.openMessage ?? 'Service temporarily unavailable (circuit open). Please try again later.';
+  const failureCodes = new Set(config?.failureCodes ?? [500, 502, 503, 504]);
+  const scope = config?.scope ?? 'per-path';
+
+  const circuits = new Map<string, CircuitEntry>();
+
+  function getKey(path: string): string {
+    return scope === 'global' ? '__global__' : path;
+  }
+
+  function getCircuit(key: string): CircuitEntry {
+    let entry = circuits.get(key);
+    if (!entry) {
+      entry = { state: 'closed', failures: 0, successes: 0, lastFailureAt: 0 };
+      circuits.set(key, entry);
+    }
+    return entry;
+  }
+
+  function recordFailure(key: string): void {
+    const circuit = getCircuit(key);
+    circuit.failures++;
+    circuit.successes = 0;
+    circuit.lastFailureAt = Date.now();
+
+    if (circuit.failures >= failureThreshold) {
+      circuit.state = 'open';
+    }
+  }
+
+  function recordSuccess(key: string): void {
+    const circuit = getCircuit(key);
+    if (circuit.state === 'half-open') {
+      circuit.successes++;
+      if (circuit.successes >= halfOpenSuccesses) {
+        // Enough successes in half-open → close the circuit
+        circuit.state = 'closed';
+        circuit.failures = 0;
+        circuit.successes = 0;
+      }
+    } else {
+      // Reset failures on success in closed state
+      circuit.failures = 0;
+      circuit.successes = 0;
+    }
+  }
+
+  return {
+    name: 'circuit-breaker',
+
+    async beforePaymentCheck(_req, ctx): Promise<PluginResult> {
+      const key = getKey(ctx.path || '/');
+      const circuit = getCircuit(key);
+      const now = Date.now();
+
+      // Check if open circuit should transition to half-open
+      if (circuit.state === 'open' && (now - circuit.lastFailureAt) >= resetTimeMs) {
+        circuit.state = 'half-open';
+        circuit.successes = 0;
+      }
+
+      if (circuit.state === 'open') {
+        const retryAfter = Math.max(1, Math.ceil((resetTimeMs - (now - circuit.lastFailureAt)) / 1000));
+        return {
+          reject: true,
+          rejectStatus: openStatus,
+          rejectMessage: openMessage,
+          headers: {
+            'X-Circuit-State': 'open',
+            'X-Circuit-Failures': String(circuit.failures),
+            'Retry-After': String(retryAfter),
+          },
+        };
+      }
+
+      return {
+        headers: {
+          'X-Circuit-State': circuit.state,
+          ...(circuit.state === 'half-open' ? { 'X-Circuit-Successes': String(circuit.successes) } : {}),
+        },
+      };
+    },
+
+    async afterSettled(_req, result, ctx): Promise<void> {
+      const key = getKey(ctx.path || '/');
+
+      // Check if the settlement itself failed or returned error codes
+      if (!result.success) {
+        recordFailure(key);
+        return;
+      }
+
+      // Check response status if available
+      const status = (result as any).statusCode || (result as any).status;
+      if (status && failureCodes.has(status)) {
+        recordFailure(key);
+      } else {
+        recordSuccess(key);
+      }
+    },
+  };
+}
+
+
+// ============================================================================
+// Refund Plugin
+// ============================================================================
+
+export interface RefundPluginConfig {
+  /**
+   * HTTP status codes that trigger a refund/credit after payment.
+   * Default: [500, 502, 503, 504]
+   */
+  triggerCodes?: number[];
+  /**
+   * What to do when a refund is triggered.
+   * - 'credit': record a credit that the free-tier plugin can consume later
+   * - 'log': just log the event (useful with a custom onRefund callback)
+   * Default: 'credit'
+   */
+  mode?: 'credit' | 'log';
+  /**
+   * Called whenever a refund event is triggered.
+   * Use for external refund processing, logging, or notifications.
+   */
+  onRefund?: (event: RefundEvent) => void | Promise<void>;
+  /**
+   * Also trigger refund when settlement itself fails (result.success === false).
+   * Default: true
+   */
+  refundOnSettlementFailure?: boolean;
+}
+
+export interface RefundEvent {
+  /** Buyer wallet address */
+  payer: string;
+  /** Transaction ID of the original payment */
+  transactionId: string;
+  /** Network used */
+  network: string;
+  /** Amount paid in USD */
+  amount: number;
+  /** Request path */
+  path: string;
+  /** Reason for the refund */
+  reason: 'endpoint_error' | 'settlement_failure' | 'timeout';
+  /** HTTP status code that triggered the refund (if applicable) */
+  statusCode?: number;
+  /** Timestamp */
+  timestamp: number;
+}
+
+/**
+ * Refund plugin — automatically handles refund/credit when a paid request fails.
+ *
+ * After payment settles, if the endpoint returns an error (e.g. 500),
+ * the plugin records a credit or calls your custom `onRefund` handler.
+ * Credits can be consumed by the free-tier plugin on the next request.
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { refund } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   plugins: [
+ *     refund({
+ *       triggerCodes: [500, 502, 503],
+ *       onRefund: (event) => {
+ *         console.log(`Refund for ${event.payer}: $${event.amount} on ${event.path}`);
+ *         // Notify buyer, record in DB, etc.
+ *       },
+ *     }),
+ *   ],
+ * });
+ * ```
+ */
+export function refund(config?: RefundPluginConfig): RelaiPlugin {
+  const triggerCodes = new Set(config?.triggerCodes ?? [500, 502, 503, 504]);
+  const mode = config?.mode ?? 'credit';
+  const onRefund = config?.onRefund;
+  const refundOnSettlementFailure = config?.refundOnSettlementFailure ?? true;
+
+  // In-memory credit ledger: payer → number of credits
+  const credits = new Map<string, number>();
+
+  return {
+    name: 'refund',
+
+    async beforePaymentCheck(req, ctx): Promise<PluginResult> {
+      // If buyer has credits from previous refunds, skip payment
+      if (mode === 'credit') {
+        const buyerId =
+          req.headers?.['x-buyer-id'] ||
+          req.headers?.['authorization']?.replace(/^Bearer\s+/i, '') ||
+          req.ip ||
+          req.socket?.remoteAddress ||
+          'unknown';
+
+        const buyerCredits = credits.get(buyerId) || 0;
+        if (buyerCredits > 0) {
+          credits.set(buyerId, buyerCredits - 1);
+          return {
+            skip: true,
+            headers: {
+              'X-Refund-Credit': 'applied',
+              'X-Refund-Credits-Remaining': String(buyerCredits - 1),
+            },
+            meta: {
+              refundCredit: true,
+              creditsRemaining: buyerCredits - 1,
+            },
+          };
+        }
+      }
+
+      return {};
+    },
+
+    async afterSettled(req, result, ctx): Promise<void> {
+      const payer = result.payer || 'unknown';
+      const transactionId = result.transaction || '';
+
+      // Settlement failure
+      if (!result.success && refundOnSettlementFailure) {
+        const event: RefundEvent = {
+          payer,
+          transactionId,
+          network: ctx.network,
+          amount: ctx.price,
+          path: ctx.path,
+          reason: 'settlement_failure',
+          timestamp: Date.now(),
+        };
+
+        if (mode === 'credit') {
+          const buyerId =
+            req.headers?.['x-buyer-id'] ||
+            req.ip ||
+            req.socket?.remoteAddress ||
+            'unknown';
+          credits.set(buyerId, (credits.get(buyerId) || 0) + 1);
+        }
+
+        try {
+          await onRefund?.(event);
+        } catch (err) {
+          console.warn('[relai:refund] onRefund callback error:', err);
+        }
+        return;
+      }
+
+      // Check for endpoint error codes in settlement result
+      const status = (result as any).statusCode || (result as any).status;
+      if (status && triggerCodes.has(status)) {
+        const event: RefundEvent = {
+          payer,
+          transactionId,
+          network: ctx.network,
+          amount: ctx.price,
+          path: ctx.path,
+          reason: 'endpoint_error',
+          statusCode: status,
+          timestamp: Date.now(),
+        };
+
+        if (mode === 'credit') {
+          const buyerId =
+            req.headers?.['x-buyer-id'] ||
+            req.ip ||
+            req.socket?.remoteAddress ||
+            'unknown';
+          credits.set(buyerId, (credits.get(buyerId) || 0) + 1);
+        }
+
+        try {
+          await onRefund?.(event);
+        } catch (err) {
+          console.warn('[relai:refund] onRefund callback error:', err);
+        }
+      }
+    },
+  };
+}

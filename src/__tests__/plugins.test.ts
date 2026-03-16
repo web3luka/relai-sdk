@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Relai from '../server';
-import { freeTier, shield, preflight } from '../plugins';
+import { freeTier, shield, preflight, circuitBreaker, refund } from '../plugins';
 import type { RelaiPlugin, PluginContext } from '../plugins';
 
 // ============================================================================
@@ -1003,6 +1003,337 @@ describe('preflight() plugin', () => {
 
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({ status: 'ok', preflight: true });
+    });
+  });
+});
+
+
+// ============================================================================
+// circuitBreaker() plugin unit tests
+// ============================================================================
+
+describe('circuitBreaker() plugin', () => {
+  const ctx: PluginContext = {
+    network: 'base',
+    price: 0.01,
+    path: '/api/data',
+    method: 'GET',
+  };
+
+  it('has correct name', () => {
+    const plugin = circuitBreaker();
+    expect(plugin.name).toBe('circuit-breaker');
+  });
+
+  it('has beforePaymentCheck and afterSettled hooks', () => {
+    const plugin = circuitBreaker();
+    expect(typeof plugin.beforePaymentCheck).toBe('function');
+    expect(typeof plugin.afterSettled).toBe('function');
+  });
+
+  describe('closed state (default)', () => {
+    it('allows requests through when circuit is closed', async () => {
+      const plugin = circuitBreaker();
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBeUndefined();
+      expect(result.headers?.['X-Circuit-State']).toBe('closed');
+    });
+  });
+
+  describe('opening the circuit', () => {
+    it('opens after failureThreshold consecutive failures', async () => {
+      const plugin = circuitBreaker({ failureThreshold: 3, resetTimeMs: 60000 });
+      const req = mockReq();
+
+      // Record 3 failures
+      for (let i = 0; i < 3; i++) {
+        await plugin.afterSettled!(req, { success: false } as any, ctx);
+      }
+
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+      expect(result.reject).toBe(true);
+      expect(result.rejectStatus).toBe(503);
+      expect(result.headers?.['X-Circuit-State']).toBe('open');
+      expect(result.headers?.['Retry-After']).toBeDefined();
+    });
+
+    it('does not open before threshold', async () => {
+      const plugin = circuitBreaker({ failureThreshold: 5 });
+      const req = mockReq();
+
+      for (let i = 0; i < 4; i++) {
+        await plugin.afterSettled!(req, { success: false } as any, ctx);
+      }
+
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+      expect(result.reject).toBeUndefined();
+    });
+
+    it('resets failure count on success', async () => {
+      const plugin = circuitBreaker({ failureThreshold: 3 });
+      const req = mockReq();
+
+      await plugin.afterSettled!(req, { success: false } as any, ctx);
+      await plugin.afterSettled!(req, { success: false } as any, ctx);
+      // Success resets
+      await plugin.afterSettled!(req, { success: true, transaction: 'tx1', payer: '0x1' } as any, ctx);
+      await plugin.afterSettled!(req, { success: false } as any, ctx);
+
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+      expect(result.reject).toBeUndefined();
+    });
+  });
+
+  describe('half-open state', () => {
+    it('transitions to half-open after resetTime', async () => {
+      const plugin = circuitBreaker({ failureThreshold: 2, resetTimeMs: 0, halfOpenSuccesses: 2 });
+      const req = mockReq();
+
+      // Open the circuit
+      await plugin.afterSettled!(req, { success: false } as any, ctx);
+      await plugin.afterSettled!(req, { success: false } as any, ctx);
+
+      // resetTimeMs: 0 → immediately half-open
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+      expect(result.reject).toBeUndefined();
+      expect(result.headers?.['X-Circuit-State']).toBe('half-open');
+    });
+
+    it('closes after enough successes in half-open', async () => {
+      const plugin = circuitBreaker({ failureThreshold: 2, resetTimeMs: 0, halfOpenSuccesses: 2 });
+      const req = mockReq();
+
+      await plugin.afterSettled!(req, { success: false } as any, ctx);
+      await plugin.afterSettled!(req, { success: false } as any, ctx);
+
+      // Transition to half-open
+      await plugin.beforePaymentCheck!(req, ctx);
+
+      // 2 successes in half-open → close
+      await plugin.afterSettled!(req, { success: true, transaction: 'tx1', payer: '0x1' } as any, ctx);
+      await plugin.afterSettled!(req, { success: true, transaction: 'tx2', payer: '0x1' } as any, ctx);
+
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+      expect(result.headers?.['X-Circuit-State']).toBe('closed');
+    });
+  });
+
+  describe('per-path scope', () => {
+    it('tracks circuits independently per path', async () => {
+      const plugin = circuitBreaker({ failureThreshold: 2, scope: 'per-path' });
+      const req = mockReq();
+
+      // Fail /api/a
+      await plugin.afterSettled!(req, { success: false } as any, { ...ctx, path: '/api/a' });
+      await plugin.afterSettled!(req, { success: false } as any, { ...ctx, path: '/api/a' });
+
+      // /api/a should be open
+      const resultA = await plugin.beforePaymentCheck!(req, { ...ctx, path: '/api/a' });
+      expect(resultA.reject).toBe(true);
+
+      // /api/b should still be closed
+      const resultB = await plugin.beforePaymentCheck!(req, { ...ctx, path: '/api/b' });
+      expect(resultB.reject).toBeUndefined();
+    });
+  });
+
+  describe('global scope', () => {
+    it('tracks all paths as one circuit', async () => {
+      const plugin = circuitBreaker({ failureThreshold: 2, scope: 'global' });
+      const req = mockReq();
+
+      await plugin.afterSettled!(req, { success: false } as any, { ...ctx, path: '/api/a' });
+      await plugin.afterSettled!(req, { success: false } as any, { ...ctx, path: '/api/b' });
+
+      // Both paths affected
+      const resultA = await plugin.beforePaymentCheck!(req, { ...ctx, path: '/api/a' });
+      expect(resultA.reject).toBe(true);
+
+      const resultC = await plugin.beforePaymentCheck!(req, { ...ctx, path: '/api/c' });
+      expect(resultC.reject).toBe(true);
+    });
+  });
+
+  describe('custom config', () => {
+    it('uses custom openMessage and openStatus', async () => {
+      const plugin = circuitBreaker({
+        failureThreshold: 1,
+        openStatus: 502,
+        openMessage: 'Circuit is open!',
+        resetTimeMs: 60000,
+      });
+      const req = mockReq();
+
+      await plugin.afterSettled!(req, { success: false } as any, ctx);
+
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+      expect(result.reject).toBe(true);
+      expect(result.rejectStatus).toBe(502);
+      expect(result.rejectMessage).toBe('Circuit is open!');
+    });
+  });
+
+  describe('integration with Relai.protect()', () => {
+    it('rejects request when circuit is open', async () => {
+      mockFetch.mockResolvedValue({ ok: true });
+
+      const cb = circuitBreaker({ failureThreshold: 1, resetTimeMs: 60000 });
+
+      // Open the circuit by simulating a failure
+      await cb.afterSettled!(mockReq(), { success: false } as any, ctx);
+
+      const middleware = createProtectedMiddleware([cb]);
+      const req = mockReq();
+      const res = mockRes();
+      const next = mockNext();
+
+      await middleware(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.stringContaining('circuit open'),
+          plugin: 'circuit-breaker',
+        }),
+      );
+      expect(next).not.toHaveBeenCalled();
+    });
+  });
+});
+
+
+// ============================================================================
+// refund() plugin unit tests
+// ============================================================================
+
+describe('refund() plugin', () => {
+  const ctx: PluginContext = {
+    network: 'base',
+    price: 0.01,
+    path: '/api/data',
+    method: 'GET',
+  };
+
+  it('has correct name', () => {
+    const plugin = refund();
+    expect(plugin.name).toBe('refund');
+  });
+
+  it('has beforePaymentCheck and afterSettled hooks', () => {
+    const plugin = refund();
+    expect(typeof plugin.beforePaymentCheck).toBe('function');
+    expect(typeof plugin.afterSettled).toBe('function');
+  });
+
+  describe('credit mode', () => {
+    it('does not skip payment when no credits exist', async () => {
+      const plugin = refund({ mode: 'credit' });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.skip).toBeUndefined();
+    });
+
+    it('grants credit on settlement failure and applies it next request', async () => {
+      const plugin = refund({ mode: 'credit' });
+      const req = mockReq({ ip: '1.2.3.4' });
+
+      // Settlement failure → credit granted
+      await plugin.afterSettled!(req, { success: false, payer: '0x1', transaction: 'tx1' } as any, ctx);
+
+      // Next request from same IP → credit applied
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+      expect(result.skip).toBe(true);
+      expect(result.headers?.['X-Refund-Credit']).toBe('applied');
+    });
+
+    it('decrements credits correctly', async () => {
+      const plugin = refund({ mode: 'credit' });
+      const req = mockReq({ ip: '1.2.3.4' });
+
+      // 2 failures → 2 credits
+      await plugin.afterSettled!(req, { success: false, payer: '0x1', transaction: 'tx1' } as any, ctx);
+      await plugin.afterSettled!(req, { success: false, payer: '0x1', transaction: 'tx2' } as any, ctx);
+
+      // First use
+      const r1 = await plugin.beforePaymentCheck!(req, ctx);
+      expect(r1.skip).toBe(true);
+      expect(r1.headers?.['X-Refund-Credits-Remaining']).toBe('1');
+
+      // Second use
+      const r2 = await plugin.beforePaymentCheck!(req, ctx);
+      expect(r2.skip).toBe(true);
+      expect(r2.headers?.['X-Refund-Credits-Remaining']).toBe('0');
+
+      // No more credits
+      const r3 = await plugin.beforePaymentCheck!(req, ctx);
+      expect(r3.skip).toBeUndefined();
+    });
+  });
+
+  describe('log mode', () => {
+    it('does not grant credits in log mode', async () => {
+      const plugin = refund({ mode: 'log' });
+      const req = mockReq({ ip: '1.2.3.4' });
+
+      await plugin.afterSettled!(req, { success: false, payer: '0x1', transaction: 'tx1' } as any, ctx);
+
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+      expect(result.skip).toBeUndefined();
+    });
+  });
+
+  describe('onRefund callback', () => {
+    it('calls onRefund on settlement failure', async () => {
+      const onRefund = vi.fn();
+      const plugin = refund({ onRefund });
+      const req = mockReq();
+
+      await plugin.afterSettled!(req, { success: false, payer: '0xBuyer', transaction: 'tx123' } as any, ctx);
+
+      expect(onRefund).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payer: '0xBuyer',
+          transactionId: 'tx123',
+          reason: 'settlement_failure',
+          amount: 0.01,
+          path: '/api/data',
+        }),
+      );
+    });
+
+    it('does not call onRefund on success', async () => {
+      const onRefund = vi.fn();
+      const plugin = refund({ onRefund });
+      const req = mockReq();
+
+      await plugin.afterSettled!(req, { success: true, payer: '0xBuyer', transaction: 'tx123' } as any, ctx);
+
+      expect(onRefund).not.toHaveBeenCalled();
+    });
+
+    it('handles onRefund errors gracefully', async () => {
+      const onRefund = vi.fn().mockRejectedValue(new Error('callback failed'));
+      const plugin = refund({ onRefund });
+      const req = mockReq();
+
+      // Should not throw
+      await plugin.afterSettled!(req, { success: false, payer: '0x1', transaction: 'tx1' } as any, ctx);
+      expect(onRefund).toHaveBeenCalled();
+    });
+  });
+
+  describe('refundOnSettlementFailure config', () => {
+    it('skips refund on settlement failure when disabled', async () => {
+      const onRefund = vi.fn();
+      const plugin = refund({ onRefund, refundOnSettlementFailure: false });
+      const req = mockReq();
+
+      await plugin.afterSettled!(req, { success: false, payer: '0x1', transaction: 'tx1' } as any, ctx);
+
+      expect(onRefund).not.toHaveBeenCalled();
     });
   });
 });
