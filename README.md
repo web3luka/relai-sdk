@@ -341,7 +341,7 @@ import {
 } from '@relai-fi/x402/utils';
 
 // Plugins — extend protect() with built-in & custom logic
-import { freeTier, bridge, shield, preflight } from '@relai-fi/x402/plugins';
+import { freeTier, bridge, shield, preflight, circuitBreaker, refund } from '@relai-fi/x402/plugins';
 
 // Management API — create/manage APIs, pricing, analytics, agent bootstrap
 import {
@@ -513,10 +513,10 @@ app.get('/api/solana-data', relai.protect({
 
 ## Plugins
 
-Extend `Relai.protect()` with plugins that hook into the payment lifecycle. Four built-in plugins ship with the SDK:
+Extend `Relai.protect()` with plugins that hook into the payment lifecycle. Six built-in plugins ship with the SDK:
 
 ```typescript
-import { freeTier, bridge, shield, preflight } from '@relai-fi/x402/plugins';
+import { freeTier, bridge, shield, preflight, circuitBreaker, refund } from '@relai-fi/x402/plugins';
 ```
 
 | Plugin | Purpose | Hook |
@@ -525,6 +525,8 @@ import { freeTier, bridge, shield, preflight } from '@relai-fi/x402/plugins';
 | **bridge** | Cross-chain payments (Solana ↔ SKALE ↔ Base) | `enrich402Response` |
 | **shield** | Global service health check before payment | `beforePaymentCheck` → `reject` |
 | **preflight** | Per-endpoint liveness probe before payment | `beforePaymentCheck` → `reject` |
+| **circuitBreaker** | Failure history tracking, auto-open circuit | `beforePaymentCheck` → `reject` + `afterSettled` |
+| **refund** | Auto-credit buyers when paid requests fail | `beforePaymentCheck` → `skip` + `afterSettled` |
 
 ### Free Tier Plugin
 
@@ -686,6 +688,72 @@ app.get('/api/data', relai.protect({
 | Cache | Single result (10s) | Per-path (5s) |
 | Use case | DB/Redis/external API down | Specific endpoint not responding |
 
+### Circuit Breaker Plugin
+
+Tracks failure history and automatically "opens the circuit" after repeated failures — preventing buyers from paying for broken endpoints. **Zero-latency** — no extra HTTP requests.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { circuitBreaker } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'base',
+  plugins: [
+    circuitBreaker({
+      failureThreshold: 5,  // open after 5 failures
+      resetTimeMs: 30000,   // try again after 30s
+    }),
+  ],
+});
+```
+
+**States:** closed (normal) → open (all rejected 503) → half-open (test requests) → closed.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `failureThreshold` | `number` | `5` | Consecutive failures before circuit opens |
+| `resetTimeMs` | `number` | `30000` | Time (ms) circuit stays open before half-open |
+| `halfOpenSuccesses` | `number` | `2` | Successes needed in half-open to close |
+| `openStatus` | `number` | `503` | HTTP status when circuit is open |
+| `openMessage` | `string` | `Service temporarily unavailable...` | Error message |
+| `failureCodes` | `number[]` | `[500, 502, 503, 504]` | HTTP codes treated as failures |
+| `scope` | `'global' \| 'per-path'` | `'per-path'` | Track globally or per endpoint |
+
+**Response headers:** `X-Circuit-State: closed|open|half-open`, `Retry-After` (when open).
+
+### Refund Plugin
+
+Automatically compensates buyers when paid requests fail. Records an in-memory credit or calls your custom handler.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { refund } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'base',
+  plugins: [
+    refund({
+      triggerCodes: [500, 502, 503],
+      mode: 'credit',
+      onRefund: (event) => {
+        console.log(`Refund: $${event.amount} to ${event.payer}`);
+      },
+    }),
+  ],
+});
+```
+
+**Modes:**
+- `credit` — records credit per buyer. Next request skips payment automatically. Header: `X-Refund-Credit: applied`.
+- `log` — only calls `onRefund`. Handle refunds externally (DB, Stripe, etc.).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `triggerCodes` | `number[]` | `[500, 502, 503, 504]` | HTTP codes that trigger a refund |
+| `mode` | `'credit' \| 'log'` | `'credit'` | Auto-credit or callback-only |
+| `onRefund` | `(event: RefundEvent) => void` | — | Callback on every refund event |
+| `refundOnSettlementFailure` | `boolean` | `true` | Also refund when settlement itself fails |
+
 ### Combining Plugins
 
 Plugins run in array order. Combine them for layered protection:
@@ -696,8 +764,10 @@ const relai = new Relai({
   plugins: [
     shield({ healthUrl: 'https://my-api.com/health' }),  // 1. Is the service up?
     preflight({ baseUrl: 'https://my-api.com' }),         // 2. Is this endpoint alive?
-    freeTier({ perBuyerLimit: 5, resetPeriod: 'daily' }), // 3. Free calls left?
-    bridge({ serviceKey: process.env.RELAI_SERVICE_KEY }), // 4. Cross-chain support
+    circuitBreaker({ failureThreshold: 5 }),              // 3. Too many recent failures?
+    freeTier({ perBuyerLimit: 5, resetPeriod: 'daily' }), // 4. Free calls left?
+    refund({ triggerCodes: [500, 502, 503] }),             // 5. Compensate on error
+    bridge({ serviceKey: process.env.RELAI_SERVICE_KEY }), // 6. Cross-chain support
   ],
 });
 ```
