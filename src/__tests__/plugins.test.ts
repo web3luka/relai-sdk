@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Relai from '../server';
-import { freeTier } from '../plugins';
+import { freeTier, shield } from '../plugins';
 import type { RelaiPlugin, PluginContext } from '../plugins';
 
 // ============================================================================
@@ -632,5 +632,203 @@ describe('Relai.protect() with plugins', () => {
     await middleware(req, res, next);
 
     expect(plugin.beforePaymentCheck).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// shield() plugin unit tests
+// ============================================================================
+
+describe('shield() plugin', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  const ctx: PluginContext = {
+    network: 'base',
+    price: 0.01,
+    path: '/api/data',
+    method: 'GET',
+  };
+
+  it('has correct name', () => {
+    const plugin = shield();
+    expect(plugin.name).toBe('shield');
+  });
+
+  it('has beforePaymentCheck hook', () => {
+    const plugin = shield();
+    expect(typeof plugin.beforePaymentCheck).toBe('function');
+  });
+
+  it('has onInit hook', () => {
+    const plugin = shield();
+    expect(typeof plugin.onInit).toBe('function');
+  });
+
+  describe('no config (no-op mode)', () => {
+    it('returns healthy when no healthCheck or healthUrl configured', async () => {
+      const plugin = shield();
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBeUndefined();
+      expect(result.headers?.['X-Shield-Status']).toBe('healthy');
+    });
+  });
+
+  describe('healthCheck function', () => {
+    it('returns healthy when healthCheck returns true', async () => {
+      const plugin = shield({
+        healthCheck: () => true,
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBeUndefined();
+      expect(result.headers?.['X-Shield-Status']).toBe('healthy');
+    });
+
+    it('returns reject when healthCheck returns false', async () => {
+      const plugin = shield({
+        healthCheck: () => false,
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBe(true);
+      expect(result.rejectStatus).toBe(503);
+      expect(result.headers?.['X-Shield-Status']).toBe('unhealthy');
+      expect(result.headers?.['Retry-After']).toBeDefined();
+    });
+
+    it('returns reject when healthCheck throws', async () => {
+      const plugin = shield({
+        healthCheck: () => { throw new Error('boom'); },
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBe(true);
+      expect(result.rejectStatus).toBe(503);
+    });
+
+    it('supports async healthCheck', async () => {
+      const plugin = shield({
+        healthCheck: async () => true,
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBeUndefined();
+      expect(result.headers?.['X-Shield-Status']).toBe('healthy');
+    });
+
+    it('uses custom unhealthyMessage and unhealthyStatus', async () => {
+      const plugin = shield({
+        healthCheck: () => false,
+        unhealthyMessage: 'Backend is down',
+        unhealthyStatus: 502,
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBe(true);
+      expect(result.rejectStatus).toBe(502);
+      expect(result.rejectMessage).toBe('Backend is down');
+    });
+  });
+
+  describe('healthUrl', () => {
+    it('returns healthy when URL responds 200', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true });
+
+      const plugin = shield({
+        healthUrl: 'https://my-api.com/health',
+        cacheTtlMs: 0,
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBeUndefined();
+      expect(result.headers?.['X-Shield-Status']).toBe('healthy');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://my-api.com/health',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    it('returns reject when URL responds 500', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+
+      const plugin = shield({
+        healthUrl: 'https://my-api.com/health',
+        cacheTtlMs: 0,
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBe(true);
+      expect(result.rejectStatus).toBe(503);
+    });
+
+    it('returns reject when fetch throws (network error)', async () => {
+      mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+      const plugin = shield({
+        healthUrl: 'https://my-api.com/health',
+        cacheTtlMs: 0,
+      });
+      const req = mockReq();
+      const result = await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(result.reject).toBe(true);
+    });
+  });
+
+  describe('caching', () => {
+    it('caches health result within TTL', async () => {
+      let callCount = 0;
+      const plugin = shield({
+        healthCheck: () => { callCount++; return true; },
+        cacheTtlMs: 60000,
+      });
+      const req = mockReq();
+
+      await plugin.beforePaymentCheck!(req, ctx);
+      await plugin.beforePaymentCheck!(req, ctx);
+      await plugin.beforePaymentCheck!(req, ctx);
+
+      expect(callCount).toBe(1);
+    });
+  });
+
+  describe('integration with Relai.protect()', () => {
+    it('rejects request with 503 when unhealthy', async () => {
+      // Mock facilitator /supported call (plugins init happens before payment check)
+      mockFetch.mockResolvedValue({ ok: false, status: 500 });
+
+      const middleware = createProtectedMiddleware([
+        shield({
+          healthCheck: () => false,
+          cacheTtlMs: 0,
+        }),
+      ]);
+
+      const req = mockReq();
+      const res = mockRes();
+      const next = mockNext();
+
+      await middleware(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.stringContaining('Service temporarily unavailable'),
+          plugin: 'shield',
+        }),
+      );
+      expect(next).not.toHaveBeenCalled();
+    });
   });
 });

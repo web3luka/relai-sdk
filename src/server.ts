@@ -584,6 +584,22 @@ export class Relai {
             if (!plugin.beforePaymentCheck) continue;
             try {
               const pluginResult = await plugin.beforePaymentCheck(req, pluginCtx);
+
+              // Reject: plugin blocks the request entirely (e.g. service unhealthy)
+              if (pluginResult?.reject) {
+                const rejectStatus = pluginResult.rejectStatus || 503;
+                if (pluginResult.headers) {
+                  for (const [k, v] of Object.entries(pluginResult.headers)) {
+                    res.setHeader(k, v);
+                  }
+                }
+                return res.status(rejectStatus).json({
+                  error: pluginResult.rejectMessage || 'Service unavailable',
+                  plugin: plugin.name,
+                });
+              }
+
+              // Skip: bypass payment and serve content for free
               if (pluginResult?.skip) {
                 // Set plugin-provided headers
                 if (pluginResult.headers) {

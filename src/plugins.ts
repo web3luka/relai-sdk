@@ -25,6 +25,12 @@ export interface PluginContext {
 export interface PluginResult {
   /** If true, skip payment and serve content for free */
   skip?: boolean;
+  /** If true, reject the request entirely (e.g. service unhealthy) */
+  reject?: boolean;
+  /** HTTP status code when rejecting (default: 503) */
+  rejectStatus?: number;
+  /** Error message when rejecting */
+  rejectMessage?: string;
   /** Extra response headers to set */
   headers?: Record<string, string>;
   /** Metadata attached to req.pluginMeta */
@@ -619,6 +625,133 @@ export function freeTier(config: FreeTierPluginConfig): FreeTierPlugin {
       }
 
       return {};
+    },
+  };
+}
+
+// ============================================================================
+// Shield Plugin
+// ============================================================================
+
+export interface ShieldPluginConfig {
+  /**
+   * Custom health check function. Return true if the service is healthy.
+   * Takes priority over `healthUrl` if both are provided.
+   */
+  healthCheck?: () => Promise<boolean> | boolean;
+  /**
+   * URL to probe. A 2xx response means healthy.
+   * Ignored if `healthCheck` is provided.
+   */
+  healthUrl?: string;
+  /** Timeout in ms for the health probe (default: 5000) */
+  timeoutMs?: number;
+  /** Cache the health result for this many ms (default: 10000) */
+  cacheTtlMs?: number;
+  /** Message returned to the caller when unhealthy (default: 'Service temporarily unavailable. Please try again later.') */
+  unhealthyMessage?: string;
+  /** HTTP status code when unhealthy (default: 503) */
+  unhealthyStatus?: number;
+}
+
+/**
+ * Shield plugin — protects buyers from paying for unhealthy endpoints.
+ *
+ * Before the server returns a 402, Shield runs a health check (custom
+ * function or URL probe). If the service is down, the request is rejected
+ * with 503 instead of asking for payment.
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { shield } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   plugins: [
+ *     shield({
+ *       healthUrl: 'https://my-api.com/health',
+ *       timeoutMs: 3000,
+ *     }),
+ *   ],
+ * });
+ *
+ * // If /health is down, buyers get 503 instead of 402
+ * app.get('/api/data', relai.protect({
+ *   payTo: '0xYourWallet',
+ *   price: 0.01,
+ * }), (req, res) => {
+ *   res.json({ data: 'premium content' });
+ * });
+ * ```
+ */
+export function shield(config?: ShieldPluginConfig): RelaiPlugin {
+  const timeoutMs = config?.timeoutMs ?? 5000;
+  const cacheTtl = config?.cacheTtlMs ?? 10000;
+  const unhealthyMessage = config?.unhealthyMessage ?? 'Service temporarily unavailable. Please try again later.';
+  const unhealthyStatus = config?.unhealthyStatus ?? 503;
+
+  let cached: { healthy: boolean; expiresAt: number } | null = null;
+
+  async function checkHealth(): Promise<boolean> {
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return cached.healthy;
+    }
+
+    let healthy = true;
+
+    try {
+      if (config?.healthCheck) {
+        healthy = await Promise.resolve(config.healthCheck());
+      } else if (config?.healthUrl) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const res = await fetch(config.healthUrl, {
+            method: 'GET',
+            signal: controller.signal,
+          });
+          healthy = res.ok;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      // No healthCheck and no healthUrl → always healthy (no-op mode)
+    } catch {
+      healthy = false;
+    }
+
+    cached = { healthy, expiresAt: now + cacheTtl };
+    return healthy;
+  }
+
+  return {
+    name: 'shield',
+
+    async onInit() {
+      const healthy = await checkHealth();
+      console.log(`[relai:shield] Initial health check: ${healthy ? 'healthy ✓' : 'UNHEALTHY ✗'}`);
+    },
+
+    async beforePaymentCheck(_req, _ctx): Promise<PluginResult> {
+      const healthy = await checkHealth();
+
+      if (!healthy) {
+        return {
+          reject: true,
+          rejectStatus: unhealthyStatus,
+          rejectMessage: unhealthyMessage,
+          headers: {
+            'X-Shield-Status': 'unhealthy',
+            'Retry-After': String(Math.ceil(cacheTtl / 1000)),
+          },
+        };
+      }
+
+      return {
+        headers: { 'X-Shield-Status': 'healthy' },
+      };
     },
   };
 }
