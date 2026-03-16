@@ -435,15 +435,15 @@ describe('Relai.protect() with plugins', () => {
   });
 
   it('returns 402 when plugin says not free and no payment header', async () => {
+    // Mock the config sync (onInit - runs first in protect via lazy init)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ success: true }),
+    });
     // Mock the free-tier check returning not free
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ free: false, reason: 'per_buyer_exhausted' }),
-    });
-    // Mock the config sync (onInit)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ success: true }),
     });
 
     const middleware = createProtectedMiddleware([

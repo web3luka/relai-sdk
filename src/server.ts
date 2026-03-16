@@ -417,23 +417,15 @@ export class Relai {
   private facilitatorUrl: string;
   private feePayerCache: Map<string, string> = new Map(); // Cache feePayer per network
   private plugins: RelaiPlugin[];
-  private pluginsInitialized = false;
+  private pluginInitPromise: Promise<void> | null = null;
 
   constructor(config: RelaiServerConfig) {
     this.network = config.network;
     this.facilitatorUrl = config.facilitatorUrl || RELAI_FACILITATOR_URL;
     this.plugins = config.plugins ?? [];
-
-    // Fire-and-forget plugin init (sync config to backend, etc.)
-    if (this.plugins.length > 0) {
-      this.initPlugins().catch((err) => {
-        console.warn('[Relai] Plugin initialization error (non-blocking):', err);
-      });
-    }
   }
 
-  private async initPlugins(): Promise<void> {
-    if (this.pluginsInitialized) return;
+  private async runPluginInit(): Promise<void> {
     for (const plugin of this.plugins) {
       if (plugin.onInit) {
         try {
@@ -443,7 +435,6 @@ export class Relai {
         }
       }
     }
-    this.pluginsInitialized = true;
   }
 
   /**
@@ -575,8 +566,13 @@ export class Relai {
         // -----------------------------------------------------------
         // Plugin hooks: beforePaymentCheck
         // If any plugin returns { skip: true }, bypass payment entirely.
+        // Ensure plugins are initialized (config synced) before checking.
         // -----------------------------------------------------------
         if (!paymentHeader && self.plugins.length > 0) {
+          if (!self.pluginInitPromise) {
+            self.pluginInitPromise = self.runPluginInit();
+          }
+          await self.pluginInitPromise;
           const pluginCtx: PluginContext = {
             network,
             price: resolvedPrice,
