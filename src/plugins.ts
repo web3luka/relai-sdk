@@ -51,6 +51,12 @@ export interface RelaiPlugin {
    * Use to sync config to RelAI backend or validate credentials.
    */
   onInit?(): Promise<void>;
+
+  /**
+   * Called before sending the 402 response. Allows plugins to add
+   * extensions or modify the response body (e.g. bridge info).
+   */
+  enrich402Response?(response: any, ctx: PluginContext): any;
 }
 
 // ============================================================================
@@ -113,6 +119,155 @@ interface FreeTierCheckResponse {
  * });
  * ```
  */
+// ============================================================================
+// Bridge Plugin
+// ============================================================================
+
+export interface BridgePluginConfig {
+  /** RelAI API base URL (default: https://api.relai.fi) */
+  baseUrl?: string;
+  /** Override settle endpoint (auto-discovered from /bridge/info if not set) */
+  settleEndpoint?: string;
+  /** Override supported source chains (auto-discovered if not set) */
+  supportedSourceChains?: string[];
+  /** Override supported source assets (auto-discovered if not set) */
+  supportedSourceAssets?: string[];
+  /** Override bridge payTo map: { [caip2]: address } */
+  payTo?: Record<string, string>;
+  /** Override Solana fee payer address (auto-discovered if not set) */
+  feePayerSvm?: string;
+  /** Override payment facilitator URL */
+  paymentFacilitator?: string;
+  /** Bridge fee in basis points (default: auto-discovered) */
+  feeBps?: number;
+}
+
+interface BridgeInfo {
+  settleEndpoint: string;
+  supportedSourceChains: string[];
+  supportedSourceAssets: string[];
+  payTo: Record<string, string>;
+  feePayerSvm: string | null;
+  feeBps: number;
+  paymentFacilitator: string;
+}
+
+/**
+ * Bridge plugin - enables cross-chain payments via the RelAI bridge.
+ *
+ * When a buyer's wallet is on a different chain than the merchant accepts,
+ * the client SDK can automatically route the payment through the bridge.
+ * This plugin adds `extensions.bridge` to the 402 response with all the
+ * info the client needs to execute a cross-chain payment.
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { bridge } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'skale-base',
+ *   plugins: [
+ *     bridge(), // auto-discovers from https://api.relai.fi
+ *   ],
+ * });
+ *
+ * // Buyer on Solana can now pay for a SKALE endpoint
+ * app.get('/api/data', relai.protect({
+ *   payTo: '0xYourWallet',
+ *   price: 0.05,
+ * }), (req, res) => {
+ *   res.json({ data: 'paid content' });
+ * });
+ * ```
+ */
+export function bridge(config?: BridgePluginConfig): RelaiPlugin {
+  const base = (config?.baseUrl ?? RELAI_API_BASE).replace(/\/$/, '');
+  let bridgeInfo: BridgeInfo | null = null;
+
+  async function fetchBridgeInfo(): Promise<BridgeInfo | null> {
+    try {
+      const res = await fetch(`${base}/bridge/info`);
+      if (!res.ok) {
+        console.warn(`[relai:bridge] Failed to fetch /bridge/info: ${res.status}`);
+        return null;
+      }
+      const data = await res.json() as any;
+      return {
+        settleEndpoint: config?.settleEndpoint || data.settleEndpoint,
+        supportedSourceChains: config?.supportedSourceChains || data.supportedSourceChains || [],
+        supportedSourceAssets: config?.supportedSourceAssets || data.supportedSourceAssets || [],
+        payTo: config?.payTo || data.payTo || {},
+        feePayerSvm: config?.feePayerSvm ?? data.feePayerSvm ?? null,
+        feeBps: config?.feeBps ?? data.feeBps ?? 100,
+        paymentFacilitator: config?.paymentFacilitator || data.paymentFacilitator || 'https://facilitator.x402.fi',
+      };
+    } catch (err) {
+      console.warn(`[relai:bridge] Failed to fetch bridge info: ${err}`);
+      return null;
+    }
+  }
+
+  return {
+    name: 'bridge',
+
+    async onInit() {
+      bridgeInfo = await fetchBridgeInfo();
+      if (bridgeInfo) {
+        console.log(`[relai:bridge] Initialized — ${bridgeInfo.supportedSourceChains.length} source chains, settle: ${bridgeInfo.settleEndpoint}`);
+      } else {
+        console.warn('[relai:bridge] Bridge info not available — cross-chain payments disabled');
+      }
+    },
+
+    enrich402Response(response: any, ctx: PluginContext) {
+      if (!bridgeInfo || bridgeInfo.supportedSourceChains.length === 0) {
+        return response;
+      }
+
+      // Don't add bridge extension if merchant's network is already a source chain
+      // and there's only that one chain — no bridging needed
+      const merchantCaip2 = response?.accepts?.[0]?.network;
+
+      // Filter out the merchant's own chain from source chains
+      // (buyer on same chain should pay directly, not bridge)
+      const otherSourceChains = bridgeInfo.supportedSourceChains.filter(
+        (c: string) => c !== merchantCaip2,
+      );
+
+      if (otherSourceChains.length === 0) {
+        return response;
+      }
+
+      // Find the payTo for the first available source chain (Solana-first for UX)
+      const solanaChain = otherSourceChains.find((c: string) => c.startsWith('solana:'));
+      const primaryPayTo = solanaChain
+        ? bridgeInfo.payTo[solanaChain]
+        : bridgeInfo.payTo[otherSourceChains[0]];
+
+      response.extensions = response.extensions || {};
+      response.extensions.bridge = {
+        info: {
+          settleEndpoint: bridgeInfo.settleEndpoint,
+          supportedSourceChains: otherSourceChains,
+          supportedSourceAssets: bridgeInfo.supportedSourceAssets,
+          payTo: primaryPayTo || null,
+          payToMap: bridgeInfo.payTo,
+          feePayerSvm: bridgeInfo.feePayerSvm,
+          feeBps: bridgeInfo.feeBps,
+          paymentFacilitator: bridgeInfo.paymentFacilitator,
+        },
+      };
+
+      return response;
+    },
+  };
+}
+
+// ============================================================================
+// Free Tier Plugin
+// ============================================================================
+
 export function freeTier(config: FreeTierPluginConfig): RelaiPlugin {
   const base = (config.baseUrl ?? RELAI_API_BASE).replace(/\/$/, '');
   const cacheTtl = config.cacheTtlMs ?? 5000;

@@ -37,6 +37,7 @@ export type {
   PluginContext,
   PluginResult,
   FreeTierPluginConfig,
+  BridgePluginConfig,
 } from './plugins';
 
 // All types & constants

@@ -626,7 +626,7 @@ export class Relai {
           // Get facilitator feePayer address — use explicit override if provided, otherwise fetch
           const feePayer = (options.feePayer as string | undefined) || await self.getFeePayer(caip2);
 
-          return res.status(402).json({
+          let paymentRequiredResponse: any = {
             x402Version: 2,
             error: 'Payment required',
             resource: {
@@ -665,7 +665,27 @@ export class Relai {
                   },
                 }
               : {}),
-          });
+          };
+
+          // Plugin hooks: enrich402Response (e.g. bridge adds extensions.bridge)
+          if (self.plugins.length > 0) {
+            const enrichCtx: PluginContext = {
+              network,
+              price: resolvedPrice,
+              path: req.path || req.originalUrl || '/',
+              method: (req.method || 'GET').toUpperCase(),
+            };
+            for (const plugin of self.plugins) {
+              if (!plugin.enrich402Response) continue;
+              try {
+                paymentRequiredResponse = plugin.enrich402Response(paymentRequiredResponse, enrichCtx) || paymentRequiredResponse;
+              } catch (pluginErr) {
+                console.warn(`[Relai] Plugin '${plugin.name}' enrich402Response error (non-blocking):`, pluginErr);
+              }
+            }
+          }
+
+          return res.status(402).json(paymentRequiredResponse);
         }
 
         // -----------------------------------------------------------
@@ -687,6 +707,51 @@ export class Relai {
             });
           }
         }
+
+        // -----------------------------------------------------------
+        // Bridged payment: trust the bridge proof (already settled)
+        // -----------------------------------------------------------
+        if (paymentProof.bridged === true && paymentProof.targetTxId) {
+          console.log(`[Relai] Bridged payment accepted: source=${paymentProof.sourceTxId}, target=${paymentProof.targetTxId}`);
+
+          const paymentInfo: PaymentInfo = {
+            verified: true,
+            transactionId: paymentProof.targetTxId,
+            payer: paymentProof.sourceTxId || 'bridge',
+            network,
+            amount: resolvedPrice,
+          };
+          req.payment = paymentInfo;
+          req.x402Payer = paymentProof.sourceTxId || 'bridge';
+          req.x402Paid = true;
+          req.x402Transaction = paymentProof.targetTxId;
+          req.x402Network = network;
+          req.x402Bridged = true;
+          req.x402SourceChain = paymentProof.sourceChain;
+
+          const paymentResponse = {
+            x402Version: 2,
+            scheme: 'exact',
+            network: caip2,
+            transaction: paymentProof.targetTxId,
+            payer: paymentProof.sourceTxId,
+            amount,
+            asset,
+            bridged: true,
+          };
+          res.setHeader(
+            'PAYMENT-RESPONSE',
+            Buffer.from(JSON.stringify(paymentResponse)).toString('base64'),
+          );
+
+          options.onPaymentSettled?.(req, { success: true, transaction: paymentProof.targetTxId, payer: paymentProof.sourceTxId } as SettleResult);
+
+          return next();
+        }
+
+        // -----------------------------------------------------------
+        // Standard payment: settle via facilitator
+        // -----------------------------------------------------------
 
         // Resolve payTo for settle (extract from signed proof when using Stripe)
         let settlePayTo: string;

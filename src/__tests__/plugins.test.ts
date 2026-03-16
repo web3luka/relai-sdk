@@ -128,6 +128,12 @@ describe('freeTier() plugin', () => {
     });
 
     it('defaults paths to ["*"] when not specified', async () => {
+      // Mock GET /config check (returns no existing configs)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ configs: [] }),
+      });
+      // Mock PUT /config sync
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true }),
@@ -140,7 +146,8 @@ describe('freeTier() plugin', () => {
 
       await plugin.onInit!();
 
-      const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      // PUT is the second call (index 1)
+      const callBody = JSON.parse(mockFetch.mock.calls[1][1].body);
       expect(callBody.paths).toEqual(['*']);
     });
 
@@ -395,7 +402,12 @@ describe('Relai.protect() with plugins', () => {
   });
 
   it('calls next() without payment when plugin returns skip:true', async () => {
-    // Mock the config sync (onInit - fires first from constructor)
+    // Mock GET /config check (syncConfig)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ configs: [] }),
+    });
+    // Mock PUT /config sync (onInit)
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ success: true }),
@@ -465,7 +477,12 @@ describe('Relai.protect() with plugins', () => {
   });
 
   it('attaches pluginMeta to req on free tier bypass', async () => {
-    // Mock the config sync (onInit - fires first from constructor)
+    // Mock GET /config check (syncConfig)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ configs: [] }),
+    });
+    // Mock PUT /config sync (onInit)
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ success: true }),
