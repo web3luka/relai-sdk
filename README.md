@@ -340,8 +340,8 @@ import {
   fromAtomicUnits,
 } from '@relai-fi/x402/utils';
 
-// Plugins — extend protect() with free tier, custom logic
-import { freeTier } from '@relai-fi/x402/plugins';
+// Plugins — extend protect() with built-in & custom logic
+import { freeTier, bridge, shield, preflight } from '@relai-fi/x402/plugins';
 
 // Management API — create/manage APIs, pricing, analytics, agent bootstrap
 import {
@@ -513,7 +513,18 @@ app.get('/api/solana-data', relai.protect({
 
 ## Plugins
 
-Extend `Relai.protect()` with plugins that run before payment checks. Plugins can skip payment (e.g. free tier), add headers, or attach metadata to requests.
+Extend `Relai.protect()` with plugins that hook into the payment lifecycle. Four built-in plugins ship with the SDK:
+
+```typescript
+import { freeTier, bridge, shield, preflight } from '@relai-fi/x402/plugins';
+```
+
+| Plugin | Purpose | Hook |
+|--------|---------|------|
+| **freeTier** | Free API calls before payment | `beforePaymentCheck` → `skip` |
+| **bridge** | Cross-chain payments (Solana ↔ SKALE ↔ Base) | `enrich402Response` |
+| **shield** | Global service health check before payment | `beforePaymentCheck` → `reject` |
+| **preflight** | Per-endpoint liveness probe before payment | `beforePaymentCheck` → `reject` |
 
 ### Free Tier Plugin
 
@@ -554,16 +565,15 @@ app.get('/api/data', relai.protect({
 3. If free → `next()` is called without payment, `req.x402Free = true`, and usage is recorded.
 4. If exhausted → normal x402 payment flow continues.
 
-**Free Tier config:**
+**Config:**
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `serviceKey` | `string` | **required** | Your RelAI service key (`sk_live_...`) |
+| `serviceKey` | `string` | — | Your `sk_live_...` key. Omit for local in-memory mode. |
 | `perBuyerLimit` | `number` | **required** | Free calls each buyer gets per period |
-| `resetPeriod` | `'never' \| 'daily' \| 'monthly'` | `'never'` | When counters reset |
+| `resetPeriod` | `'none' \| 'daily' \| 'monthly'` | `'none'` | When counters reset |
 | `globalCap` | `number` | — | Max total free calls across all buyers |
 | `paths` | `string[]` | `['*']` | Which endpoints the free tier applies to |
-| `baseUrl` | `string` | `https://api.relai.fi` | RelAI API URL (override for testing) |
 
 **Request properties set on free-tier bypass:**
 
@@ -574,27 +584,147 @@ app.get('/api/data', relai.protect({
 | `req.x402Plugin` | `string` | Plugin name that granted the bypass (`'freeTier'`) |
 | `req.pluginMeta` | `object` | `{ freeTier: true, remaining: number }` |
 
-**Dashboard:** Manage plugin config and view usage in the RelAI dashboard under **SDK Plugins**.
+### Bridge Plugin
+
+Accept cross-chain payments. Buyers on Solana can pay your SKALE Base API — the SDK handles bridging automatically.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { bridge } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'skale-bite',
+  plugins: [
+    bridge({ serviceKey: process.env.RELAI_SERVICE_KEY }),
+  ],
+});
+```
+
+The plugin auto-discovers bridge capabilities from `/bridge/info`. No manual chain configuration needed.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `serviceKey` | `string` | — | Recommended. Tracks bridge usage in dashboard. |
+| `settleEndpoint` | `string` | `/bridge/settle` | Custom settle endpoint |
+| `feeBps` | `number` | `100` | Bridge fee in basis points (100 = 1%) |
+
+### Shield Plugin
+
+Global service health check — protects buyers from paying for unhealthy endpoints. Before the server returns 402, Shield runs a health check. If unhealthy, returns 503 instead of asking for payment.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { shield } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'base',
+  plugins: [
+    shield({
+      healthUrl: 'https://my-api.com/health',
+      timeoutMs: 3000,
+    }),
+    // Or use a custom function:
+    // shield({
+    //   healthCheck: async () => {
+    //     const dbOk = await checkDatabase();
+    //     return dbOk;
+    //   },
+    // }),
+  ],
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `healthUrl` | `string` | — | URL to probe. 2xx = healthy. |
+| `healthCheck` | `() => boolean \| Promise<boolean>` | — | Custom function. Takes priority over `healthUrl`. |
+| `timeoutMs` | `number` | `5000` | Timeout for health probe (ms) |
+| `cacheTtlMs` | `number` | `10000` | Cache health result (ms) |
+| `unhealthyStatus` | `number` | `503` | HTTP status when unhealthy |
+| `unhealthyMessage` | `string` | `Service temporarily unavailable...` | Error message |
+
+**Response headers:** `X-Shield-Status: healthy|unhealthy`, `Retry-After` (when unhealthy).
+
+### Preflight Plugin
+
+Per-endpoint liveness probe — verifies the **specific endpoint** responds before payment. Sends `HEAD` with `X-Preflight: true` header; the middleware responds 200 instantly without triggering payment.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { preflight } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'base',
+  plugins: [
+    preflight({ baseUrl: 'https://my-api.com' }),
+  ],
+});
+
+// If /api/data doesn't respond, buyers get 503 — never 402
+app.get('/api/data', relai.protect({
+  payTo: '0xYourWallet',
+  price: 0.01,
+}), handler);
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `baseUrl` | `string` | **required** | Base URL of the API. Request path is appended automatically. |
+| `timeoutMs` | `number` | `3000` | Timeout for probe (ms) |
+| `cacheTtlMs` | `number` | `5000` | Cache per-path result (ms) |
+| `unhealthyStatus` | `number` | `503` | HTTP status when unreachable |
+| `unhealthyMessage` | `string` | `Endpoint not responding...` | Error message |
+
+**Response headers:** `X-Preflight-Status: ok|unreachable`, `Retry-After` (when unreachable).
+
+**Shield vs Preflight:**
+
+| | Shield | Preflight |
+|---|--------|-----------|
+| Scope | Global service health | Per-endpoint liveness |
+| Probe target | Separate health URL / function | The actual protected endpoint |
+| Cache | Single result (10s) | Per-path (5s) |
+| Use case | DB/Redis/external API down | Specific endpoint not responding |
+
+### Combining Plugins
+
+Plugins run in array order. Combine them for layered protection:
+
+```typescript
+const relai = new Relai({
+  network: 'base',
+  plugins: [
+    shield({ healthUrl: 'https://my-api.com/health' }),  // 1. Is the service up?
+    preflight({ baseUrl: 'https://my-api.com' }),         // 2. Is this endpoint alive?
+    freeTier({ perBuyerLimit: 5, resetPeriod: 'daily' }), // 3. Free calls left?
+    bridge({ serviceKey: process.env.RELAI_SERVICE_KEY }), // 4. Cross-chain support
+  ],
+});
+```
 
 ### Custom Plugins
 
 ```typescript
-import type { RelaiPlugin } from '@relai-fi/x402';
+import type { RelaiPlugin, PluginContext, PluginResult } from '@relai-fi/x402/plugins';
 
 const myPlugin: RelaiPlugin = {
-  name: 'myPlugin',
-  beforePaymentCheck: async (ctx) => {
-    if (ctx.req.headers['x-vip'] === 'true') {
-      return { skip: true, reason: 'VIP bypass' };
+  name: 'my-plugin',
+
+  async beforePaymentCheck(req, ctx) {
+    if (req.headers['x-vip'] === 'true') {
+      return { skip: true, headers: { 'X-VIP': 'true' } };
     }
     return {};
   },
-};
 
-const relai = new Relai({
-  network: 'base',
-  plugins: [myPlugin],
-});
+  async afterSettled(req, result, ctx) {
+    console.log(`Paid $${ctx.price} by ${result.payer} on ${ctx.network}`);
+  },
+
+  async onInit() {
+    console.log('Plugin initialized');
+  },
+};
 ```
 
 **Plugin interface:**
@@ -602,9 +732,26 @@ const relai = new Relai({
 ```typescript
 interface RelaiPlugin {
   name: string;
-  beforePaymentCheck?: (ctx: PluginContext) => Promise<PluginResult>;
-  afterSettled?: (ctx: PluginContext) => Promise<void>;
-  onInit?: (config: RelaiServerConfig) => Promise<void>;
+  beforePaymentCheck?(req: any, ctx: PluginContext): Promise<PluginResult>;
+  afterSettled?(req: any, result: SettleResult, ctx: PluginContext): Promise<void>;
+  onInit?(): Promise<void>;
+  enrich402Response?(response: any, ctx: PluginContext): any;
+}
+
+interface PluginResult {
+  skip?: boolean;      // Bypass payment, serve content free
+  reject?: boolean;    // Block request entirely (e.g. unhealthy)
+  rejectStatus?: number;
+  rejectMessage?: string;
+  headers?: Record<string, string>;
+  meta?: Record<string, unknown>;
+}
+
+interface PluginContext {
+  network: string;
+  price: number;
+  path: string;
+  method: string;
 }
 ```
 
