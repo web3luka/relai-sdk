@@ -40,7 +40,7 @@ export type {
   BridgePluginConfig,
   ScorePluginConfig,
   FeedbackPluginConfig,
-  RelayFeedbackPluginConfig,
+  RelayFeedbackConfig,
   SolanaFeedbackPluginConfig,
 } from './plugins';
 
