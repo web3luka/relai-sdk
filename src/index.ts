@@ -39,6 +39,7 @@ export type {
   FreeTierPluginConfig,
   BridgePluginConfig,
   ScorePluginConfig,
+  FeedbackPluginConfig,
 } from './plugins';
 
 // All types & constants

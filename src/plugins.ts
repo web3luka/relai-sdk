@@ -1434,3 +1434,153 @@ export function score(config: ScorePluginConfig): RelaiPlugin {
     },
   };
 }
+
+// ============================================================================
+// Feedback Plugin
+// ============================================================================
+
+export interface FeedbackPluginConfig {
+  /**
+   * ERC-8004 agentId (NFT tokenId) for this API.
+   */
+  agentId: string | number;
+  /**
+   * Private key of the wallet that signs feedback transactions.
+   * The wallet must hold CREDIT tokens on SKALE Base to pay gas.
+   * Default: process.env.BACKEND_WALLET_PRIVATE_KEY
+   */
+  walletPrivateKey?: string;
+  /**
+   * SKALE Base Sepolia RPC URL.
+   * Default: process.env.ERC8004_RPC_URL or SKALE Base Sepolia public RPC.
+   */
+  rpcUrl?: string;
+  /**
+   * ERC-8004 ReputationRegistry contract address.
+   * Default: process.env.ERC8004_REPUTATION_REGISTRY
+   */
+  reputationRegistryAddress?: string;
+  /**
+   * Tag2 label for all feedback entries (default: 'x402').
+   */
+  tag2?: string;
+  /**
+   * Whether to submit successRate feedback (default: true).
+   * Value: 1 (success) or 0 (failure).
+   */
+  submitSuccessRate?: boolean;
+  /**
+   * Whether to submit responseTime feedback (default: true).
+   * Value: milliseconds elapsed since request start.
+   * Requires req.x402StartTime (set automatically if using Relai.protect()).
+   */
+  submitResponseTime?: boolean;
+}
+
+const FEEDBACK_REPUTATION_ABI = [
+  'function giveFeedback(uint256 agentId, int128 value, uint8 valueDecimals, string tag1, string tag2, string endpoint, string feedbackURI, bytes32 feedbackHash) external',
+];
+
+/**
+ * Feedback plugin — submits ERC-8004 on-chain reputation after every successful x402 settlement.
+ *
+ * Records `successRate` and `responseTime` signals to the ReputationRegistry on SKALE Base.
+ * This is the mechanism that **builds** the score that `score()` plugin later reads.
+ *
+ * Runs fire-and-forget — never blocks the response.
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { score, feedback } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   plugins: [
+ *     score({ agentId: '5' }),
+ *     feedback({ agentId: '5' }), // needs BACKEND_WALLET_PRIVATE_KEY in env
+ *   ],
+ * });
+ * ```
+ */
+export function feedback(config: FeedbackPluginConfig): RelaiPlugin {
+  const agentId = String(config.agentId);
+  const tag2 = config.tag2 ?? 'x402';
+  const submitSuccessRate = config.submitSuccessRate ?? true;
+  const submitResponseTime = config.submitResponseTime ?? true;
+
+  let _reputation: any = null;
+
+  function getReputation() {
+    if (_reputation) return _reputation;
+
+    const privateKey = config.walletPrivateKey
+      ?? (typeof process !== 'undefined' ? process.env?.BACKEND_WALLET_PRIVATE_KEY : undefined);
+    const reputationAddress = config.reputationRegistryAddress
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_REPUTATION_REGISTRY : undefined);
+    const rpcUrl = config.rpcUrl
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_RPC_URL : undefined)
+      ?? 'https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha';
+
+    if (!privateKey || !reputationAddress) return null;
+
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const signer = new ethers.Wallet(privateKey, provider);
+    _reputation = new ethers.Contract(reputationAddress, FEEDBACK_REPUTATION_ABI, signer);
+    return _reputation;
+  }
+
+  function submitAsync(tag1: string, value: number, valueDecimals: number, endpoint: string) {
+    const reputation = getReputation();
+    if (!reputation) return;
+
+    (async () => {
+      try {
+        const tx = await reputation.giveFeedback(
+          BigInt(agentId),
+          BigInt(Math.round(value)),
+          valueDecimals,
+          tag1,
+          tag2,
+          endpoint,
+          '',
+          ethers.ZeroHash,
+        );
+        console.log(`[relai:feedback] Submitted agentId=${agentId} tag=${tag1} value=${value} tx=${tx.hash}`);
+      } catch (err: any) {
+        console.warn(`[relai:feedback] giveFeedback failed (non-fatal): ${err?.message}`);
+      }
+    })();
+  }
+
+  return {
+    name: 'feedback',
+
+    async onInit() {
+      const reputation = getReputation();
+      if (reputation) {
+        console.log(`[relai:feedback] Initialized — agentId=${agentId}, submitSuccessRate=${submitSuccessRate}, submitResponseTime=${submitResponseTime}`);
+      } else {
+        console.warn(`[relai:feedback] BACKEND_WALLET_PRIVATE_KEY or ERC8004_REPUTATION_REGISTRY not set — feedback disabled`);
+      }
+    },
+
+    async afterSettled(req: any, result: SettleResult, ctx: PluginContext) {
+      const endpoint = ctx.path ?? '';
+
+      // successRate: 1 = success, 0 = failure
+      if (submitSuccessRate) {
+        submitAsync('successRate', result.success ? 1 : 0, 0, endpoint);
+      }
+
+      // responseTime in ms — use req.x402StartTime if available
+      if (submitResponseTime) {
+        const startTime = req?.x402StartTime ?? req?.x402StartedAt;
+        const responseTimeMs = startTime ? Date.now() - Number(startTime) : 0;
+        if (responseTimeMs > 0) {
+          submitAsync('responseTime', responseTimeMs, 0, endpoint);
+        }
+      }
+    },
+  };
+}
