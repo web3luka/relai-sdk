@@ -40,6 +40,7 @@ export type {
   BridgePluginConfig,
   ScorePluginConfig,
   FeedbackPluginConfig,
+  RelayFeedbackPluginConfig,
 } from './plugins';
 
 // All types & constants

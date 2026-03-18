@@ -1241,6 +1241,143 @@ export function refund(config?: RefundPluginConfig): RelaiPlugin {
 }
 
 // ============================================================================
+// Relay Feedback Plugin
+// ============================================================================
+
+export interface RelayFeedbackPluginConfig {
+  /**
+   * ERC-8004 agentId (NFT tokenId) of the API being called.
+   */
+  agentId: string | number;
+  /**
+   * Private key of the **relay/third-party** wallet that signs feedback.
+   * MUST be different from the API owner's wallet — ReputationRegistry
+   * may restrict self-feedback. The wallet needs CREDIT tokens on SKALE Base.
+   * Default: process.env.FEEDBACK_WALLET_PRIVATE_KEY
+   */
+  feedbackWalletPrivateKey?: string;
+  /**
+   * SKALE Base Sepolia RPC URL.
+   * Default: process.env.ERC8004_RPC_URL or SKALE Base Sepolia public RPC.
+   */
+  rpcUrl?: string;
+  /**
+   * ERC-8004 ReputationRegistry contract address.
+   * Default: process.env.ERC8004_REPUTATION_REGISTRY
+   */
+  reputationRegistryAddress?: string;
+}
+
+const RELAY_FEEDBACK_REPUTATION_ABI = [
+  'function giveFeedback(uint256 agentId, int128 value, uint8 valueDecimals, string tag1, string tag2, string endpoint, string feedbackURI, bytes32 feedbackHash) external',
+];
+
+/**
+ * Relay Feedback plugin — submits ERC-8004 on-chain feedback as a **third party**.
+ *
+ * Use this when your server acts as a relay or marketplace calling other APIs.
+ * Uses a separate relay wallet (not the API owner's key) to satisfy ReputationRegistry
+ * self-feedback restrictions.
+ *
+ * Records:
+ * - `successRate`: 10000 (= 100%) on success, 0 on failure — 2 decimal places
+ * - `responseTime`: elapsed ms since request start
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { relayFeedback } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'solana',
+ *   plugins: [
+ *     relayFeedback({ agentId: '5' }), // needs FEEDBACK_WALLET_PRIVATE_KEY in env
+ *   ],
+ * });
+ * ```
+ */
+export function relayFeedback(config: RelayFeedbackPluginConfig): RelaiPlugin {
+  const agentId = String(config.agentId);
+
+  let _reputation: any = null;
+
+  function getReputation() {
+    if (_reputation) return _reputation;
+
+    const privateKey = config.feedbackWalletPrivateKey
+      ?? (typeof process !== 'undefined'
+        ? process.env?.FEEDBACK_WALLET_PRIVATE_KEY ?? process.env?.ERC8004_FEEDBACK_WALLET_PRIVATE_KEY
+        : undefined);
+    const reputationAddress = config.reputationRegistryAddress
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_REPUTATION_REGISTRY : undefined);
+    const rpcUrl = config.rpcUrl
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_RPC_URL : undefined)
+      ?? 'https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha';
+
+    if (!privateKey || !reputationAddress) return null;
+
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const signer = new ethers.Wallet(privateKey, provider);
+    _reputation = new ethers.Contract(reputationAddress, RELAY_FEEDBACK_REPUTATION_ABI, signer);
+    return _reputation;
+  }
+
+  function submitRelayFeedbackAsync(isSuccess: boolean, responseTimeMs: number, endpoint: string) {
+    const reputation = getReputation();
+    if (!reputation) return;
+
+    (async () => {
+      const id = BigInt(agentId);
+
+      // successRate: 10000 = 100.00%, 0 = 0.00% (2 decimal places)
+      const successValue = isSuccess ? 10000n : 0n;
+      try {
+        const srTx = await reputation.giveFeedback(
+          id, successValue, 2, 'successRate', '', endpoint, '', ethers.ZeroHash,
+        );
+        await srTx.wait();
+        console.log(`[relai:relayFeedback] successRate tx confirmed agentId=${agentId} success=${isSuccess}`);
+      } catch (err: any) {
+        console.warn(`[relai:relayFeedback] successRate tx failed (non-fatal): ${err?.message}`);
+      }
+
+      // responseTime in ms (0 decimals)
+      if (responseTimeMs > 0) {
+        try {
+          const rtTx = await reputation.giveFeedback(
+            id, BigInt(Math.max(0, Math.round(responseTimeMs))), 0, 'responseTime', '', endpoint, '', ethers.ZeroHash,
+          );
+          console.log(`[relai:relayFeedback] responseTime tx sent agentId=${agentId} ms=${responseTimeMs} tx=${rtTx.hash}`);
+        } catch (err: any) {
+          console.warn(`[relai:relayFeedback] responseTime tx failed (non-fatal): ${err?.message}`);
+        }
+      }
+    })();
+  }
+
+  return {
+    name: 'relayFeedback',
+
+    async onInit() {
+      const reputation = getReputation();
+      if (reputation) {
+        console.log(`[relai:relayFeedback] Initialized — agentId=${agentId}`);
+      } else {
+        console.warn(`[relai:relayFeedback] FEEDBACK_WALLET_PRIVATE_KEY or ERC8004_REPUTATION_REGISTRY not set — relay feedback disabled`);
+      }
+    },
+
+    async afterSettled(req: any, result: SettleResult, ctx: PluginContext) {
+      const endpoint = ctx.path ?? '';
+      const startTime = req?.x402StartTime ?? req?.x402StartedAt;
+      const responseTimeMs = startTime ? Date.now() - Number(startTime) : 0;
+
+      submitRelayFeedbackAsync(result.success, responseTimeMs, endpoint);
+    },
+  };
+}
+
+// ============================================================================
 // Score Plugin
 // ============================================================================
 
