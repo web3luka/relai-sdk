@@ -2,6 +2,7 @@
 // RelAI Plugin System - extensible middleware hooks for Relai.protect()
 
 import crypto from 'crypto';
+import { ethers } from 'ethers';
 import type { RelaiNetwork } from './types';
 import type { SettleResult } from './server';
 
@@ -1250,13 +1251,22 @@ export interface ScorePluginConfig {
    */
   agentId: string | number;
   /**
-   * RelAI API base URL (default: https://api.relai.fi).
-   * Used to fetch on-chain reputation data.
+   * SKALE Base Sepolia RPC URL.
+   * Default: https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha
    */
-  relaiBaseUrl?: string;
+  rpcUrl?: string;
+  /**
+   * ERC-8004 IdentityRegistry contract address.
+   * Default: process.env.ERC8004_IDENTITY_REGISTRY
+   */
+  identityRegistryAddress?: string;
+  /**
+   * ERC-8004 ReputationRegistry contract address.
+   * Default: process.env.ERC8004_REPUTATION_REGISTRY
+   */
+  reputationRegistryAddress?: string;
   /**
    * Cache TTL in ms (default: 5 minutes).
-   * Score is fetched once and cached to avoid repeated RPC calls.
    */
   cacheTtlMs?: number;
 }
@@ -1266,9 +1276,24 @@ interface CachedScore {
   expiresAt: number;
 }
 
+const SCORE_IDENTITY_ABI = [
+  'function ownerOf(uint256 tokenId) external view returns (address)',
+];
+
+const SCORE_FEEDBACK_TOPIC = ethers.id(
+  'NewFeedback(uint256,address,uint64,int128,uint8,string,string,string,string,string,bytes32)'
+);
+
+const SCORE_FEEDBACK_IFACE = new ethers.Interface([
+  'event NewFeedback(uint256 indexed agentId, address indexed giver, uint64 index, int128 value, uint8 valueDecimals, string tag1, string tag2, string endpoint, string feedbackURI, string responseURI, bytes32 feedbackHash)',
+]);
+
+const SCORE_BATCH = 1900;
+const SCORE_HISTORY = 10000;
+
 /**
  * Score plugin — fetches ERC-8004 on-chain reputation for your API
- * and injects it into the 402 response `accepts[].extra.score` field.
+ * directly via RPC and injects it into the 402 response `extensions.score`.
  *
  * Agents can read the score **before paying**, enabling trust-based routing:
  * - `feedbackCount` — number of on-chain feedback entries
@@ -1287,71 +1312,98 @@ interface CachedScore {
  *     score({ agentId: '5' }),
  *   ],
  * });
- *
- * app.get('/api/data', relai.protect({
- *   payTo: '0xYourWallet',
- *   price: 0.01,
- * }), (req, res) => {
- *   res.json({ data: 'paid content' });
- * });
- * ```
- *
- * The client will receive in the 402 response:
- * ```json
- * {
- *   "accepts": [{
- *     "extra": {
- *       "score": {
- *         "feedbackCount": 42,
- *         "successRate": 98,
- *         "avgResponseMs": 312,
- *         "verified": true,
- *         "agentId": "5",
- *         "source": "erc8004-skale"
- *       }
- *     }
- *   }]
- * }
  * ```
  */
 export function score(config: ScorePluginConfig): RelaiPlugin {
-  const base = (config.relaiBaseUrl ?? RELAI_API_BASE).replace(/\/$/, '');
   const agentId = String(config.agentId);
   const cacheTtlMs = config.cacheTtlMs ?? 5 * 60 * 1000;
+  const rpcUrl = config.rpcUrl
+    ?? (typeof process !== 'undefined' ? process.env?.ERC8004_RPC_URL : undefined)
+    ?? 'https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha';
 
   let cached: CachedScore | null = null;
+
+  function getContracts() {
+    const identityAddress = config.identityRegistryAddress
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_IDENTITY_REGISTRY : undefined);
+    const reputationAddress = config.reputationRegistryAddress
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_REPUTATION_REGISTRY : undefined);
+    if (!identityAddress || !reputationAddress) return null;
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const identity = new ethers.Contract(identityAddress, SCORE_IDENTITY_ABI, provider);
+    return { provider, identity, reputationAddress };
+  }
 
   async function fetchScore(): Promise<Record<string, unknown> | null> {
     if (cached && cached.expiresAt > Date.now()) {
       return cached.score;
     }
 
+    const contracts = getContracts();
+    if (!contracts) {
+      console.warn(`[relai:score] ERC8004_IDENTITY_REGISTRY or ERC8004_REPUTATION_REGISTRY not set — score disabled`);
+      return null;
+    }
+
+    const { provider, identity, reputationAddress } = contracts;
+    const bigId = BigInt(agentId);
+
     try {
-      const res = await fetch(`${base}/api/erc8004/agent/${encodeURIComponent(agentId)}`);
-      if (!res.ok) {
-        console.warn(`[relai:score] Failed to fetch agent score (${res.status}) for agentId=${agentId}`);
-        return null;
+      let verified = false;
+      try {
+        const owner = await identity.ownerOf(bigId);
+        verified = !!owner;
+      } catch {
+        // Not registered
       }
 
-      const data = await res.json() as any;
+      if (!verified) {
+        const scoreObj = { feedbackCount: 0, successRate: null, avgResponseMs: null, verified: false, agentId, source: 'erc8004-skale' };
+        cached = { score: scoreObj, expiresAt: Date.now() + cacheTtlMs };
+        return scoreObj;
+      }
 
-      const scoreObj: Record<string, unknown> = {
-        feedbackCount: Number(data.feedbackCount ?? 0),
-        successRate: data.reputation?.successRate?.count > 0
-          ? Math.round(Number(data.reputation.successRate.average))
-          : null,
-        avgResponseMs: data.reputation?.responseTime?.count > 0
-          ? Math.round(Number(data.reputation.responseTime.average))
-          : null,
-        verified: !!data.owner,
-        agentId,
-        source: 'erc8004-skale',
-      };
+      const latest = await provider.getBlockNumber();
+      const agentIdTopic = ethers.zeroPadValue(ethers.toBeHex(bigId), 32);
+      const logs: any[] = [];
 
+      for (let from = Math.max(0, latest - SCORE_HISTORY); from <= latest; from += SCORE_BATCH) {
+        const to = Math.min(from + SCORE_BATCH - 1, latest);
+        const chunk = await provider.getLogs({
+          address: reputationAddress,
+          topics: [SCORE_FEEDBACK_TOPIC, agentIdTopic],
+          fromBlock: from,
+          toBlock: to,
+        });
+        logs.push(...chunk);
+      }
+
+      const srValues: number[] = [];
+      const rtValues: number[] = [];
+
+      for (const log of logs) {
+        try {
+          const p = SCORE_FEEDBACK_IFACE.parseLog({ topics: log.topics as string[], data: log.data });
+          if (!p) continue;
+          const val = Number(p.args.value) / Math.pow(10, Number(p.args.valueDecimals));
+          if (p.args.tag1 === 'successRate') srValues.push(val);
+          else if (p.args.tag1 === 'responseTime') rtValues.push(val);
+        } catch { /* skip */ }
+      }
+
+      const feedbackCount = srValues.length + rtValues.length;
+      const successRate = srValues.length
+        ? Math.round(srValues.reduce((a, b) => a + b, 0) / srValues.length)
+        : null;
+      const avgResponseMs = rtValues.length
+        ? Math.round(rtValues.reduce((a, b) => a + b, 0) / rtValues.length)
+        : null;
+
+      const scoreObj = { feedbackCount, successRate, avgResponseMs, verified: true, agentId, source: 'erc8004-skale' };
       cached = { score: scoreObj, expiresAt: Date.now() + cacheTtlMs };
       return scoreObj;
     } catch (err) {
-      console.warn(`[relai:score] fetchScore error for agentId=${agentId}:`, err);
+      console.warn(`[relai:score] fetchScore RPC error for agentId=${agentId}:`, err);
       return null;
     }
   }
