@@ -38,6 +38,7 @@ export type {
   PluginResult,
   FreeTierPluginConfig,
   BridgePluginConfig,
+  ScorePluginConfig,
 } from './plugins';
 
 // All types & constants

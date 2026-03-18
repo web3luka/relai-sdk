@@ -1238,3 +1238,152 @@ export function refund(config?: RefundPluginConfig): RelaiPlugin {
     },
   };
 }
+
+// ============================================================================
+// Score Plugin
+// ============================================================================
+
+export interface ScorePluginConfig {
+  /**
+   * ERC-8004 agentId (NFT tokenId) for this API.
+   * Find yours in the RelAI dashboard under "On-chain Identity".
+   */
+  agentId: string | number;
+  /**
+   * RelAI API base URL (default: https://api.relai.fi).
+   * Used to fetch on-chain reputation data.
+   */
+  relaiBaseUrl?: string;
+  /**
+   * Cache TTL in ms (default: 5 minutes).
+   * Score is fetched once and cached to avoid repeated RPC calls.
+   */
+  cacheTtlMs?: number;
+}
+
+interface CachedScore {
+  score: Record<string, unknown>;
+  expiresAt: number;
+}
+
+/**
+ * Score plugin — fetches ERC-8004 on-chain reputation for your API
+ * and injects it into the 402 response `accepts[].extra.score` field.
+ *
+ * Agents can read the score **before paying**, enabling trust-based routing:
+ * - `feedbackCount` — number of on-chain feedback entries
+ * - `successRate` — 0–100 (% of successful calls)
+ * - `avgResponseMs` — average response time in milliseconds
+ * - `verified` — true if agentId is registered on-chain
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { score } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   plugins: [
+ *     score({ agentId: '5' }),
+ *   ],
+ * });
+ *
+ * app.get('/api/data', relai.protect({
+ *   payTo: '0xYourWallet',
+ *   price: 0.01,
+ * }), (req, res) => {
+ *   res.json({ data: 'paid content' });
+ * });
+ * ```
+ *
+ * The client will receive in the 402 response:
+ * ```json
+ * {
+ *   "accepts": [{
+ *     "extra": {
+ *       "score": {
+ *         "feedbackCount": 42,
+ *         "successRate": 98,
+ *         "avgResponseMs": 312,
+ *         "verified": true,
+ *         "agentId": "5",
+ *         "source": "erc8004-skale"
+ *       }
+ *     }
+ *   }]
+ * }
+ * ```
+ */
+export function score(config: ScorePluginConfig): RelaiPlugin {
+  const base = (config.relaiBaseUrl ?? RELAI_API_BASE).replace(/\/$/, '');
+  const agentId = String(config.agentId);
+  const cacheTtlMs = config.cacheTtlMs ?? 5 * 60 * 1000;
+
+  let cached: CachedScore | null = null;
+
+  async function fetchScore(): Promise<Record<string, unknown> | null> {
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.score;
+    }
+
+    try {
+      const res = await fetch(`${base}/api/erc8004/agent/${encodeURIComponent(agentId)}`);
+      if (!res.ok) {
+        console.warn(`[relai:score] Failed to fetch agent score (${res.status}) for agentId=${agentId}`);
+        return null;
+      }
+
+      const data = await res.json() as any;
+
+      const scoreObj: Record<string, unknown> = {
+        feedbackCount: Number(data.feedbackCount ?? 0),
+        successRate: data.reputation?.successRate?.count > 0
+          ? Math.round(Number(data.reputation.successRate.average))
+          : null,
+        avgResponseMs: data.reputation?.responseTime?.count > 0
+          ? Math.round(Number(data.reputation.responseTime.average))
+          : null,
+        verified: !!data.owner,
+        agentId,
+        source: 'erc8004-skale',
+      };
+
+      cached = { score: scoreObj, expiresAt: Date.now() + cacheTtlMs };
+      return scoreObj;
+    } catch (err) {
+      console.warn(`[relai:score] fetchScore error for agentId=${agentId}:`, err);
+      return null;
+    }
+  }
+
+  return {
+    name: 'score',
+
+    async onInit() {
+      const s = await fetchScore();
+      if (s) {
+        console.log(`[relai:score] Initialized — agentId=${agentId}, feedback=${s.feedbackCount}, successRate=${s.successRate}%, avgResp=${s.avgResponseMs}ms`);
+      } else {
+        console.warn(`[relai:score] Could not load score for agentId=${agentId} — score will be omitted from 402 responses`);
+      }
+    },
+
+    enrich402Response(response: any, _ctx: PluginContext) {
+      const scoreData = cached?.score ?? null;
+      if (!scoreData) return response;
+
+      if (!Array.isArray(response?.accepts)) return response;
+
+      return {
+        ...response,
+        accepts: response.accepts.map((accept: any) => ({
+          ...accept,
+          extra: {
+            ...(accept.extra ?? {}),
+            score: scoreData,
+          },
+        })),
+      };
+    },
+  };
+}
