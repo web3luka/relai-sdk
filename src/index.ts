@@ -41,6 +41,7 @@ export type {
   ScorePluginConfig,
   FeedbackPluginConfig,
   RelayFeedbackPluginConfig,
+  SolanaFeedbackPluginConfig,
 } from './plugins';
 
 // All types & constants

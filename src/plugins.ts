@@ -1721,3 +1721,199 @@ export function feedback(config: FeedbackPluginConfig): RelaiPlugin {
     },
   };
 }
+
+// ============================================================================
+// Solana Feedback Plugin (8004-solana)
+// ============================================================================
+
+export interface SolanaFeedbackPluginConfig {
+  /**
+   * Solana MPL Core NFT public key (base58) of the registered agent.
+   * This is the `solanaAgentAsset` stored after calling /api/solana8004/register.
+   */
+  assetPubkey: string;
+  /**
+   * Private key of the feedback wallet — base58 or JSON array format.
+   * Should differ from the owner's registration wallet (avoids self-feedback restriction).
+   * Default: process.env.SOLANA_8004_FEEDBACK_KEY ?? process.env.SOLANA_8004_PRIVATE_KEY
+   */
+  feedbackWalletPrivateKey?: string;
+  /**
+   * Solana cluster to use.
+   * Default: process.env.SOLANA_8004_CLUSTER ?? 'mainnet-beta'
+   */
+  cluster?: 'mainnet-beta' | 'devnet';
+  /**
+   * Custom Solana RPC URL (Helius / QuickNode recommended).
+   * Default: process.env.SOLANA_8004_RPC_URL
+   */
+  rpcUrl?: string;
+  /**
+   * Whether to submit successRate feedback (default: true).
+   */
+  submitSuccessRate?: boolean;
+  /**
+   * Whether to submit responseTime feedback (default: true).
+   */
+  submitResponseTime?: boolean;
+}
+
+/**
+ * Solana Feedback plugin — submits 8004-solana on-chain reputation after x402 settlement.
+ *
+ * Uses the native Solana `8004-solana` program (MPL Core NFT registry),
+ * separate from the SKALE EVM ReputationRegistry used by `feedback()`.
+ *
+ * Requires `8004-solana` package to be installed:
+ * ```
+ * npm install 8004-solana
+ * ```
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { solanaFeedback } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'solana',
+ *   plugins: [
+ *     solanaFeedback({
+ *       assetPubkey: process.env.SOLANA_AGENT_ASSET!, // e.g. 'GH93tGR8...'
+ *     }),
+ *   ],
+ * });
+ * ```
+ */
+export function solanaFeedback(config: SolanaFeedbackPluginConfig): RelaiPlugin {
+  const assetPubkey = config.assetPubkey;
+  const submitSuccessRate = config.submitSuccessRate ?? true;
+  const submitResponseTime = config.submitResponseTime ?? true;
+
+  function getPrivateKey(): string | null {
+    return config.feedbackWalletPrivateKey
+      ?? (typeof process !== 'undefined'
+        ? process.env?.SOLANA_8004_FEEDBACK_KEY ?? process.env?.SOLANA_8004_PRIVATE_KEY
+        : undefined)
+      ?? null;
+  }
+
+  function getCluster(): string {
+    return config.cluster
+      ?? (typeof process !== 'undefined' ? process.env?.SOLANA_8004_CLUSTER : undefined)
+      ?? 'mainnet-beta';
+  }
+
+  function getRpcUrl(): string | undefined {
+    return config.rpcUrl
+      ?? (typeof process !== 'undefined' ? process.env?.SOLANA_8004_RPC_URL : undefined);
+  }
+
+  async function buildSDK(): Promise<any> {
+    let SolanaSDK: any;
+    try {
+      const mod = await import('8004-solana' as any);
+      SolanaSDK = mod.SolanaSDK;
+    } catch {
+      console.warn('[relai:solanaFeedback] 8004-solana package not installed — run: npm install 8004-solana');
+      return null;
+    }
+
+    const privateKeyRaw = getPrivateKey();
+    if (!privateKeyRaw) return null;
+
+    let secretKey: Uint8Array;
+    try {
+      const parsed = JSON.parse(privateKeyRaw);
+      if (Array.isArray(parsed)) {
+        secretKey = Uint8Array.from(parsed);
+      } else {
+        throw new Error('not array');
+      }
+    } catch {
+      // base58
+      try {
+        const bs58Mod = await import('bs58' as any);
+        const decode = bs58Mod.default?.decode ?? bs58Mod.decode;
+        secretKey = decode(privateKeyRaw);
+      } catch {
+        console.warn('[relai:solanaFeedback] Could not parse feedbackWalletPrivateKey');
+        return null;
+      }
+    }
+
+    const { Keypair } = await import('@solana/web3.js');
+    const signer = Keypair.fromSecretKey(secretKey);
+    const cluster = getCluster();
+    const rpcUrl = getRpcUrl();
+
+    return new SolanaSDK({ cluster, signer, ...(rpcUrl ? { rpcUrl } : {}) });
+  }
+
+  function submitAsync(isSuccess: boolean, responseTimeMs: number, endpoint: string) {
+    (async () => {
+      try {
+        const sdk = await buildSDK();
+        if (!sdk) return;
+
+        const { PublicKey } = await import('@solana/web3.js');
+        const pubkey = new PublicKey(assetPubkey);
+
+        if (submitSuccessRate) {
+          try {
+            const result = await sdk.giveFeedback(pubkey, {
+              value: String(isSuccess ? 10000 : 0),
+              tag1: 'successRate',
+              tag2: 'x402',
+              ...(endpoint ? { endpoint } : {}),
+            });
+            console.log(`[relai:solanaFeedback] successRate submitted asset=${assetPubkey.slice(0, 8)}... tx=${result.signature}`);
+          } catch (err: any) {
+            console.warn(`[relai:solanaFeedback] successRate failed (non-fatal): ${err?.message}`);
+          }
+        }
+
+        if (submitResponseTime && responseTimeMs > 0) {
+          try {
+            const result = await sdk.giveFeedback(pubkey, {
+              value: String(Math.round(responseTimeMs)),
+              tag1: 'responseTime',
+              tag2: 'x402',
+              ...(endpoint ? { endpoint } : {}),
+            });
+            console.log(`[relai:solanaFeedback] responseTime submitted asset=${assetPubkey.slice(0, 8)}... ms=${responseTimeMs} tx=${result.signature}`);
+          } catch (err: any) {
+            console.warn(`[relai:solanaFeedback] responseTime failed (non-fatal): ${err?.message}`);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[relai:solanaFeedback] feedback error (non-fatal): ${err?.message}`);
+      }
+    })();
+  }
+
+  return {
+    name: 'solanaFeedback',
+
+    async onInit() {
+      const privateKey = getPrivateKey();
+      if (!privateKey) {
+        console.warn('[relai:solanaFeedback] SOLANA_8004_FEEDBACK_KEY not set — Solana feedback disabled');
+        return;
+      }
+      try {
+        await import('8004-solana' as any);
+        console.log(`[relai:solanaFeedback] Initialized — asset=${assetPubkey.slice(0, 8)}... cluster=${getCluster()}`);
+      } catch {
+        console.warn('[relai:solanaFeedback] 8004-solana package not installed — run: npm install 8004-solana');
+      }
+    },
+
+    async afterSettled(req: any, result: SettleResult, ctx: PluginContext) {
+      const endpoint = ctx.path ?? '';
+      const startTime = req?.x402StartTime ?? req?.x402StartedAt;
+      const responseTimeMs = startTime ? Date.now() - Number(startTime) : 0;
+
+      submitAsync(result.success, responseTimeMs, endpoint);
+    },
+  };
+}

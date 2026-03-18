@@ -97,5 +97,8 @@
       "import": "./dist/plugins.js",
       "require": "./dist/plugins.cjs"
     }
+  },
+  "optionalDependencies": {
+    "8004-solana": "^0.8.2"
   }
 }
