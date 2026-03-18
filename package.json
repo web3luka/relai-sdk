@@ -96,6 +96,11 @@
       "types": "./dist/plugins.d.ts",
       "import": "./dist/plugins.js",
       "require": "./dist/plugins.cjs"
+    },
+    "./relay-feedback": {
+      "types": "./dist/relay-feedback.d.ts",
+      "import": "./dist/relay-feedback.js",
+      "require": "./dist/relay-feedback.cjs"
     }
   },
   "optionalDependencies": {

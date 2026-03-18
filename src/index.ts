@@ -40,9 +40,10 @@ export type {
   BridgePluginConfig,
   ScorePluginConfig,
   FeedbackPluginConfig,
-  RelayFeedbackConfig,
   SolanaFeedbackPluginConfig,
 } from './plugins';
+export type { RelayFeedbackConfig } from './relay-feedback';
+export { submitRelayFeedback } from './relay-feedback';
 
 // All types & constants
 export * from './types';
