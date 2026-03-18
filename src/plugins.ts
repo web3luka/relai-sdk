@@ -1372,17 +1372,12 @@ export function score(config: ScorePluginConfig): RelaiPlugin {
       const scoreData = cached?.score ?? null;
       if (!scoreData) return response;
 
-      if (!Array.isArray(response?.accepts)) return response;
-
       return {
         ...response,
-        accepts: response.accepts.map((accept: any) => ({
-          ...accept,
-          extra: {
-            ...(accept.extra ?? {}),
-            score: scoreData,
-          },
-        })),
+        extensions: {
+          ...(response.extensions ?? {}),
+          score: scoreData,
+        },
       };
     },
   };
