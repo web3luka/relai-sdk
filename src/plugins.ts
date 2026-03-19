@@ -1391,14 +1391,17 @@ export function score(config: ScorePluginConfig): RelaiPlugin {
 
       const srValues: number[] = [];
       const rtValues: number[] = [];
+      const endpointMap: Record<string, { sr: number[]; rt: number[] }> = {};
 
       for (const log of logs) {
         try {
           const p = SCORE_FEEDBACK_IFACE.parseLog({ topics: log.topics as string[], data: log.data });
           if (!p) continue;
           const val = Number(p.args.value) / Math.pow(10, Number(p.args.valueDecimals));
-          if (p.args.tag1 === 'successRate') srValues.push(val);
-          else if (p.args.tag1 === 'responseTime') rtValues.push(val);
+          const ep: string = p.args.endpoint || '';
+          if (!endpointMap[ep]) endpointMap[ep] = { sr: [], rt: [] };
+          if (p.args.tag1 === 'successRate') { srValues.push(val); endpointMap[ep].sr.push(val); }
+          else if (p.args.tag1 === 'responseTime') { rtValues.push(val); endpointMap[ep].rt.push(val); }
         } catch { /* skip */ }
       }
 
@@ -1410,7 +1413,16 @@ export function score(config: ScorePluginConfig): RelaiPlugin {
         ? Math.round(rtValues.reduce((a, b) => a + b, 0) / rtValues.length)
         : null;
 
-      const scoreObj = { feedbackCount, successRate, avgResponseMs, verified: true, agentId, source: 'erc8004-skale' };
+      const endpoints: Record<string, { feedbackCount: number; successRate: number | null; avgResponseMs: number | null }> = {};
+      for (const [ep, { sr, rt }] of Object.entries(endpointMap)) {
+        endpoints[ep] = {
+          feedbackCount: sr.length + rt.length,
+          successRate: sr.length ? Math.round(sr.reduce((a, b) => a + b, 0) / sr.length) : null,
+          avgResponseMs: rt.length ? Math.round(rt.reduce((a, b) => a + b, 0) / rt.length) : null,
+        };
+      }
+
+      const scoreObj = { feedbackCount, successRate, avgResponseMs, verified: true, agentId, source: 'erc8004-skale', endpoints };
       cached = { score: scoreObj, expiresAt: Date.now() + cacheTtlMs };
       return scoreObj;
     } catch (err) {
