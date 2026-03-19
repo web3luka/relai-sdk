@@ -879,7 +879,10 @@ export class Relai {
             // Wrap res.json / res.send to fire afterSettled with actual statusCode
             const originalJson = (res as any).json?.bind(res);
             const originalSend = (res as any).send?.bind(res);
+            let afterSettledFired = false;
             const fireAfterSettled = (statusCode: number) => {
+              if (afterSettledFired) return;
+              afterSettledFired = true;
               const resultWithStatus = { ...result, statusCode };
               for (const plugin of pluginsWithHook) {
                 plugin.afterSettled!(req, resultWithStatus, settleCtx).catch((e: unknown) => {
