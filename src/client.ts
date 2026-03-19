@@ -30,6 +30,32 @@ import {
 
 export type X402NetworkSelectionMode = 'prefer_then_any' | 'strict_preferred';
 
+/**
+ * MPP (Machine Payment Protocol) handler for automatic Tempo/Stripe payment.
+ * When provided, the client will detect WWW-Authenticate: Payment challenges
+ * on 402 responses and use this handler to create credentials automatically.
+ *
+ * @example
+ * ```typescript
+ * import { Mppx, tempo } from 'mppx/client';
+ * import { privateKeyToAccount } from 'viem/accounts';
+ *
+ * const mppx = Mppx.create({
+ *   methods: [tempo.charge({ account: privateKeyToAccount('0x...') })],
+ *   polyfill: false,
+ * });
+ *
+ * const client = createX402Client({
+ *   wallets: { evm: evmWallet },
+ *   mpp: mppx,
+ * });
+ * ```
+ */
+export interface MppHandler {
+  /** Create a credential string from a 402 response containing a WWW-Authenticate challenge. */
+  createCredential(response: Response): Promise<string>;
+}
+
 export interface X402ClientConfig {
   /** Multi-chain wallets (Solana + EVM) */
   wallets?: WalletSet;
@@ -59,6 +85,13 @@ export interface X402ClientConfig {
   verbose?: boolean;
   /** Default headers added to every request (e.g. X-Service-Key, X-Agent-ID for agent use) */
   defaultHeaders?: Record<string, string>;
+  /**
+   * Optional MPP (Machine Payment Protocol) handler.
+   * When set, the client automatically handles WWW-Authenticate: Payment
+   * challenges (Tempo, Stripe) on 402 responses before falling back to x402.
+   * Pass an mppx client instance (from `Mppx.create()`).
+   */
+  mpp?: MppHandler;
 }
 
 export type X402IntegritasFlow = 'single' | 'dual';
@@ -191,6 +224,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     integritas,
     verbose = false,
     defaultHeaders = {},
+    mpp,
   } = config;
 
   const relayWsEnabled = relayWs?.enabled === true;
@@ -1496,6 +1530,34 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     if (response.status !== 402) return response;
 
     log('Got 402 Payment Required');
+
+    // ── MPP: check for WWW-Authenticate: Payment challenge ──────────────
+    if (mpp) {
+      const wwwAuth = response.headers.get('www-authenticate');
+      if (wwwAuth && /^Payment\s+/i.test(wwwAuth.trim())) {
+        log('MPP challenge detected in WWW-Authenticate header');
+        try {
+          const credential = await mpp.createCredential(response);
+          if (credential) {
+            log('MPP credential created, retrying with Authorization: Payment');
+            const mppRetry = await fetch(input, {
+              ...requestInitWithHeaders,
+              headers: {
+                ...requestHeaders,
+                'Authorization': credential.startsWith('Payment ') ? credential : `Payment ${credential}`,
+              },
+            });
+            if (mppRetry.status !== 402) {
+              return mppRetry;
+            }
+            log('MPP retry still returned 402, falling through to x402');
+          }
+        } catch (mppErr) {
+          log(`MPP payment failed (${mppErr instanceof Error ? mppErr.message : mppErr}), falling through to x402`);
+        }
+      }
+    }
+    // ── End MPP ─────────────────────────────────────────────────────────
 
     let requirementsFromBody: any = null;
     try {

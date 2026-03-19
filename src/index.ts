@@ -11,6 +11,7 @@ export type {
   StripePayTo,
   RelaiIntegritasFlow,
   RelaiIntegritasOptions,
+  MppServerHandler,
 } from './server';
 export { stripePayTo } from './server';
 
@@ -27,6 +28,7 @@ export type {
   X402IntegritasFlow,
   X402IntegritasConfig,
   X402RequestOptions,
+  MppHandler,
   RelayWebSocketFactory,
   RelayWebSocketLike,
 } from './client';
