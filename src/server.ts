@@ -865,7 +865,8 @@ export class Relai {
 
         options.onPaymentSettled?.(req, result);
 
-        // Plugin hooks: afterSettled
+        // Plugin hooks: afterSettled — called AFTER the handler responds so plugins
+        // can see the actual HTTP status code (e.g. circuit breaker, refund).
         if (self.plugins.length > 0) {
           const settleCtx: PluginContext = {
             network,
@@ -873,12 +874,32 @@ export class Relai {
             path: req.path || req.originalUrl || '/',
             method: (req.method || 'GET').toUpperCase(),
           };
-          for (const plugin of self.plugins) {
-            if (!plugin.afterSettled) continue;
-            try {
-              await plugin.afterSettled(req, result, settleCtx);
-            } catch (pluginErr) {
-              console.warn(`[Relai] Plugin '${plugin.name}' afterSettled error (non-blocking):`, pluginErr);
+          const pluginsWithHook = self.plugins.filter((p) => !!p.afterSettled);
+          if (pluginsWithHook.length > 0) {
+            // Wrap res.json / res.send to fire afterSettled with actual statusCode
+            const originalJson = (res as any).json?.bind(res);
+            const originalSend = (res as any).send?.bind(res);
+            const fireAfterSettled = (statusCode: number) => {
+              const resultWithStatus = { ...result, statusCode };
+              for (const plugin of pluginsWithHook) {
+                plugin.afterSettled!(req, resultWithStatus, settleCtx).catch((e: unknown) => {
+                  console.warn(`[Relai] Plugin '${plugin.name}' afterSettled error (non-blocking):`, e);
+                });
+              }
+            };
+            if (typeof originalJson === 'function') {
+              (res as any).json = function (body: unknown) {
+                fireAfterSettled(res.statusCode ?? 200);
+                (res as any).json = originalJson; // restore
+                return originalJson(body);
+              };
+            }
+            if (typeof originalSend === 'function') {
+              (res as any).send = function (body: unknown) {
+                fireAfterSettled(res.statusCode ?? 200);
+                (res as any).send = originalSend; // restore
+                return originalSend(body);
+              };
             }
           }
         }
