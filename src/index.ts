@@ -47,6 +47,16 @@ export type {
 export type { RelayFeedbackConfig } from './relay-feedback';
 export { submitRelayFeedback } from './relay-feedback';
 
+// Payment Codes — BLIK-style x402 payment codes (SKALE L3 + Base L2)
+export { generatePaymentCode, redeemPaymentCode, getPaymentCode } from './payment-codes';
+export type {
+  PaymentCodeConfig,
+  GeneratePaymentCodeParams,
+  PaymentCode,
+  RedeemResult,
+  CodeStatus,
+} from './payment-codes';
+
 // All types & constants
 export * from './types';
 
