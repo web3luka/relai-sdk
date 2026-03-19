@@ -11,6 +11,7 @@ export type {
   StripePayTo,
   RelaiIntegritasFlow,
   RelaiIntegritasOptions,
+  MppServerHandler,
 } from './server';
 export { stripePayTo } from './server';
 
