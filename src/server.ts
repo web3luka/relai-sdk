@@ -13,6 +13,32 @@ import type { RelaiPlugin, PluginContext, PluginResult } from './plugins';
 // Types
 // ============================================================================
 
+/**
+ * Server-side MPP verifier. When provided, protect() will accept
+ * Authorization: Payment credentials and verify them via this handler.
+ *
+ * Compatible with mppx Mppx.create() server instances.
+ *
+ * @example
+ * ```typescript
+ * import { Mppx, tempo } from 'mppx/server';
+ *
+ * const mppx = Mppx.create({
+ *   secretKey: process.env.MPP_SECRET_KEY,
+ *   methods: [tempo.charge({ recipient: '0x...', currency: USDC, decimals: 6 })],
+ * });
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   mpp: mppx,
+ * });
+ * ```
+ */
+export interface MppServerHandler {
+  /** Verify an MPP credential from a Request or raw Authorization header value. */
+  verify(request: Request | { headers: Record<string, string> }): Promise<{ status: string; reference?: string; method?: string } | null>;
+}
+
 export interface RelaiServerConfig {
   /** Network to accept payments on */
   network: RelaiNetwork;
@@ -20,6 +46,12 @@ export interface RelaiServerConfig {
   facilitatorUrl?: string;
   /** Plugins to extend protect() behavior (e.g. freeTier, rateLimit) */
   plugins?: RelaiPlugin[];
+  /**
+   * Optional MPP (Machine Payment Protocol) server handler.
+   * When set, protect() accepts Authorization: Payment credentials
+   * (Tempo, Stripe MPP) alongside standard x402 payments.
+   */
+  mpp?: MppServerHandler;
 }
 
 export type DynamicPrice = number | ((req: any) => number | Promise<number>);
@@ -418,11 +450,13 @@ export class Relai {
   private feePayerCache: Map<string, string> = new Map(); // Cache feePayer per network
   private plugins: RelaiPlugin[];
   private pluginInitPromise: Promise<void> | null = null;
+  private mpp?: MppServerHandler;
 
   constructor(config: RelaiServerConfig) {
     this.network = config.network;
     this.facilitatorUrl = config.facilitatorUrl || RELAI_FACILITATOR_URL;
     this.plugins = config.plugins ?? [];
+    this.mpp = config.mpp;
   }
 
   private async runPluginInit(): Promise<void> {
@@ -570,6 +604,72 @@ export class Relai {
           req.headers['x-payment'] ||
           req.headers['payment-signature'] ||
           req.headers['x-payment-signature'];
+
+        // -----------------------------------------------------------
+        // MPP: check for Authorization: Payment credential
+        // -----------------------------------------------------------
+        const authHeader = req.headers['authorization'] || '';
+        if (!paymentHeader && self.mpp && /^Payment\s+/i.test(authHeader)) {
+          try {
+            // Build a minimal Request-like object for the mppx verifier
+            const mppRequest = {
+              headers: { ...req.headers } as Record<string, string>,
+            };
+            const receipt = await self.mpp.verify(mppRequest as any);
+
+            if (receipt && receipt.status === 'success') {
+              const paymentInfo: PaymentInfo = {
+                verified: true,
+                transactionId: receipt.reference || '',
+                payer: receipt.method || 'mpp',
+                network,
+                amount: resolvedPrice,
+              };
+              req.payment = paymentInfo;
+              req.x402Payer = receipt.method ? `${receipt.method}-mpp` : 'mpp';
+              req.x402Paid = true;
+              req.x402Transaction = receipt.reference || '';
+              req.x402Network = network;
+
+              // Set Payment-Receipt header
+              if (receipt.reference) {
+                res.setHeader('Payment-Receipt', JSON.stringify(receipt));
+              }
+
+              options.onPaymentSettled?.(req, {
+                success: true,
+                transaction: receipt.reference,
+                payer: req.x402Payer,
+              } as SettleResult);
+
+              // Plugin hooks: afterSettled
+              if (self.plugins.length > 0) {
+                const settleCtx: PluginContext = {
+                  network,
+                  price: resolvedPrice,
+                  path: req.path || req.originalUrl || '/',
+                  method: (req.method || 'GET').toUpperCase(),
+                };
+                for (const plugin of self.plugins) {
+                  if (!plugin.afterSettled) continue;
+                  try {
+                    await plugin.afterSettled(req, {
+                      success: true,
+                      transaction: receipt.reference,
+                      payer: req.x402Payer,
+                    } as SettleResult, settleCtx);
+                  } catch (pluginErr) {
+                    console.warn(`[Relai] Plugin '${plugin.name}' afterSettled error (non-blocking):`, pluginErr);
+                  }
+                }
+              }
+
+              return next();
+            }
+          } catch (mppErr) {
+            console.warn(`[Relai] MPP verification failed (${mppErr instanceof Error ? mppErr.message : mppErr}), falling through to x402`);
+          }
+        }
 
         // -----------------------------------------------------------
         // Plugin hooks: beforePaymentCheck
