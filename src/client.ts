@@ -1544,7 +1544,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
               ...requestInitWithHeaders,
               headers: {
                 ...requestHeaders,
-                'Authorization': `Payment ${credential}`,
+                'Authorization': credential.startsWith('Payment ') ? credential : `Payment ${credential}`,
               },
             });
             if (mppRetry.status !== 402) {
