@@ -620,6 +620,49 @@ export class Relai {
                 req.x402Paid = false;
                 req.x402Free = true;
                 req.x402Plugin = plugin.name;
+                // Still set up afterSettled interceptor so plugins (e.g. refund) can
+                // re-issue a credit if the endpoint fails on this free call too.
+                const skipPluginsWithHook = self.plugins.filter((p) => !!p.afterSettled);
+                if (skipPluginsWithHook.length > 0) {
+                  const skipCtx: PluginContext = {
+                    network,
+                    price: resolvedPrice,
+                    path: req.path || req.originalUrl || '/',
+                    method: (req.method || 'GET').toUpperCase(),
+                  };
+                  const skipResult: SettleResult = {
+                    success: true,
+                    payer: req.headers?.['x-wallet-address'] || req.headers?.['x-buyer-address'] || req.ip || req.socket?.remoteAddress || 'unknown',
+                    transaction: '',
+                  } as any;
+                  const originalJsonSkip = (res as any).json?.bind(res);
+                  const originalSendSkip = (res as any).send?.bind(res);
+                  let skipFired = false;
+                  const fireSkipAfterSettled = (statusCode: number) => {
+                    if (skipFired) return;
+                    skipFired = true;
+                    const resultWithStatus = { ...skipResult, statusCode };
+                    for (const p of skipPluginsWithHook) {
+                      p.afterSettled!(req, resultWithStatus, skipCtx).catch((e: unknown) => {
+                        console.warn(`[Relai] Plugin '${p.name}' afterSettled (skip) error:`, e);
+                      });
+                    }
+                  };
+                  if (typeof originalJsonSkip === 'function') {
+                    (res as any).json = function (body: unknown) {
+                      fireSkipAfterSettled(res.statusCode ?? 200);
+                      (res as any).json = originalJsonSkip;
+                      return originalJsonSkip(body);
+                    };
+                  }
+                  if (typeof originalSendSkip === 'function') {
+                    (res as any).send = function (body: unknown) {
+                      fireSkipAfterSettled(res.statusCode ?? 200);
+                      (res as any).send = originalSendSkip;
+                      return originalSendSkip(body);
+                    };
+                  }
+                }
                 return next();
               }
             } catch (pluginErr) {
