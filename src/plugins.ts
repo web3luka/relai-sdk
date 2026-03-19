@@ -1811,3 +1811,209 @@ export function solanaFeedback(config: SolanaFeedbackPluginConfig): RelaiPlugin 
     },
   };
 }
+
+// ============================================================================
+// Solana Score Plugin (8004-solana)
+// ============================================================================
+
+export interface SolanaScorePluginConfig {
+  /**
+   * Solana MPL Core NFT public key (base58) of the registered agent.
+   * This is the `solanaAgentAsset` stored after calling /api/solana8004/register.
+   */
+  assetPubkey: string;
+  /**
+   * Solana cluster to use.
+   * Default: process.env.SOLANA_8004_CLUSTER ?? 'mainnet-beta'
+   */
+  cluster?: 'mainnet-beta' | 'devnet';
+  /**
+   * Custom Solana RPC URL (Helius / QuickNode recommended).
+   * Default: process.env.SOLANA_8004_RPC_URL
+   */
+  rpcUrl?: string;
+  /**
+   * Cache TTL in ms (default: 5 minutes).
+   */
+  cacheTtlMs?: number;
+}
+
+/**
+ * Solana Score plugin — fetches 8004-solana on-chain reputation and injects it
+ * into the 402 response `extensions.score` before the client pays.
+ *
+ * Mirrors the EVM `score()` plugin but reads from the native Solana program
+ * instead of the SKALE EVM ReputationRegistry.
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { solanaScore } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'solana',
+ *   plugins: [
+ *     solanaScore({ assetPubkey: process.env.SOLANA_AGENT_ASSET! }),
+ *   ],
+ * });
+ * ```
+ */
+export function solanaScore(config: SolanaScorePluginConfig): RelaiPlugin {
+  const assetPubkey = config.assetPubkey;
+  const cacheTtlMs = config.cacheTtlMs ?? 5 * 60 * 1000;
+
+  if (!assetPubkey || String(assetPubkey) === 'undefined') {
+    console.warn('[relai:solanaScore] assetPubkey not set — solanaScore plugin is a no-op');
+    return { name: 'solanaScore', async onInit() {} };
+  }
+
+  let cached: CachedScore | null = null;
+
+  function getCluster(): string {
+    return config.cluster
+      ?? (typeof process !== 'undefined' ? process.env?.SOLANA_8004_CLUSTER : undefined)
+      ?? 'mainnet-beta';
+  }
+
+  function getRpcUrl(): string | undefined {
+    return config.rpcUrl
+      ?? (typeof process !== 'undefined' ? process.env?.SOLANA_8004_RPC_URL : undefined);
+  }
+
+  async function fetchScore(): Promise<Record<string, unknown> | null> {
+    if (cached && Date.now() < cached.expiresAt) return cached.score;
+
+    let SolanaSDK: any;
+    try {
+      const mod = await import('8004-solana' as any);
+      SolanaSDK = mod.SolanaSDK;
+    } catch {
+      console.warn('[relai:solanaScore] 8004-solana package not installed — run: npm install 8004-solana');
+      return null;
+    }
+
+    try {
+      const { PublicKey } = await import('@solana/web3.js');
+      const cluster = getCluster();
+      const rpcUrl = getRpcUrl();
+      const sdk = new SolanaSDK({ cluster, ...(rpcUrl ? { rpcUrl } : {}) });
+      const pubkey = new PublicKey(assetPubkey);
+
+      // Try getReputationSummary first (lightweight)
+      let feedbackCount = 0;
+      let successRate: number | null = null;
+      let avgResponseMs: number | null = null;
+      const endpoints: Record<string, { feedbackCount: number; successRate: number | null; avgResponseMs: number | null }> = {};
+
+      // Try to read all feedback for per-endpoint breakdown
+      let allFeedbacks: any[] = [];
+      try {
+        allFeedbacks = await sdk.readAllFeedback(pubkey);
+      } catch {
+        // fallback to summary only
+      }
+
+      if (allFeedbacks.length > 0) {
+        // Group by endpoint
+        const byEndpoint: Record<string, { successValues: number[]; responseTimes: number[] }> = {};
+        let globalSuccessValues: number[] = [];
+        let globalResponseTimes: number[] = [];
+
+        for (const entry of allFeedbacks) {
+          const tag1: string = entry.tag1 ?? '';
+          const rawValue = entry.value ?? entry.score ?? 0;
+          const value = typeof rawValue === 'bigint' ? Number(rawValue) : Number(rawValue);
+          const ep: string = entry.endpoint ?? '';
+
+          if (!byEndpoint[ep]) byEndpoint[ep] = { successValues: [], responseTimes: [] };
+
+          if (tag1 === 'successRate') {
+            globalSuccessValues.push(value);
+            byEndpoint[ep].successValues.push(value);
+          } else if (tag1 === 'responseTime') {
+            globalResponseTimes.push(value);
+            byEndpoint[ep].responseTimes.push(value);
+          }
+        }
+
+        feedbackCount = globalSuccessValues.length;
+        if (feedbackCount > 0) {
+          const avgSuccess = globalSuccessValues.reduce((a, b) => a + b, 0) / feedbackCount;
+          // value=10000 means success (100%), value=0 means failure
+          successRate = Math.round((avgSuccess / 10000) * 100);
+        }
+        if (globalResponseTimes.length > 0) {
+          avgResponseMs = Math.round(globalResponseTimes.reduce((a, b) => a + b, 0) / globalResponseTimes.length);
+        }
+
+        for (const [ep, data] of Object.entries(byEndpoint)) {
+          const epCount = data.successValues.length;
+          const epAvgSuccess = epCount > 0
+            ? data.successValues.reduce((a, b) => a + b, 0) / epCount
+            : null;
+          const epAvgMs = data.responseTimes.length > 0
+            ? Math.round(data.responseTimes.reduce((a, b) => a + b, 0) / data.responseTimes.length)
+            : null;
+          endpoints[ep || '/'] = {
+            feedbackCount: epCount,
+            successRate: epAvgSuccess !== null ? Math.round((epAvgSuccess / 10000) * 100) : null,
+            avgResponseMs: epAvgMs,
+          };
+        }
+      } else {
+        // Fallback to summary
+        try {
+          const summary = await sdk.getReputationSummary(pubkey);
+          feedbackCount = summary.count ?? 0;
+          if (feedbackCount > 0) {
+            const avg = summary.averageScore ?? 0;
+            successRate = Math.round((avg / 10000) * 100);
+          }
+        } catch {
+          // no data
+        }
+      }
+
+      const scoreObj = {
+        feedbackCount,
+        successRate,
+        avgResponseMs,
+        assetPubkey,
+        source: '8004-solana',
+        cluster,
+        ...(Object.keys(endpoints).length > 0 ? { endpoints } : {}),
+      };
+
+      cached = { score: scoreObj, expiresAt: Date.now() + cacheTtlMs };
+      return scoreObj;
+    } catch (err: any) {
+      console.warn(`[relai:solanaScore] fetch error (non-fatal): ${err?.message}`);
+      return null;
+    }
+  }
+
+  return {
+    name: 'solanaScore',
+
+    async onInit() {
+      const s = await fetchScore();
+      if (s) {
+        console.log(`[relai:solanaScore] Initialized — asset=${assetPubkey.slice(0, 8)}... feedbackCount=${(s as any).feedbackCount} cluster=${getCluster()}`);
+      } else {
+        console.warn(`[relai:solanaScore] Could not load score for asset=${assetPubkey.slice(0, 8)}... — score will be omitted from 402 responses`);
+      }
+    },
+
+    enrich402Response(response: any) {
+      const scoreData = cached?.score ?? null;
+      if (!scoreData) return response;
+      return {
+        ...response,
+        extensions: {
+          ...(response.extensions ?? {}),
+          solanaScore: scoreData,
+        },
+      };
+    },
+  };
+}
