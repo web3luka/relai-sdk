@@ -10,6 +10,7 @@ export default defineConfig({
     'src/utils/index.ts',
     'src/management.ts',
     'src/plugins.ts',
+    'src/relay-feedback.ts',
   ],
   format: ['cjs', 'esm'],
   dts: true,
