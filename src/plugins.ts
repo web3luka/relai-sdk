@@ -2,6 +2,7 @@
 // RelAI Plugin System - extensible middleware hooks for Relai.protect()
 
 import crypto from 'crypto';
+import { ethers } from 'ethers';
 import type { RelaiNetwork } from './types';
 import type { SettleResult } from './server';
 
@@ -1235,6 +1236,784 @@ export function refund(config?: RefundPluginConfig): RelaiPlugin {
           console.warn('[relai:refund] onRefund callback error:', err);
         }
       }
+    },
+  };
+}
+
+// Re-export for backwards-compatible import path '@relai-fi/x402/plugins'
+export { submitRelayFeedback, type RelayFeedbackConfig } from './relay-feedback';
+
+// ============================================================================
+// Score Plugin
+// ============================================================================
+
+export interface ScorePluginConfig {
+  /**
+   * ERC-8004 agentId (NFT tokenId) for this API.
+   * Find yours in the RelAI dashboard under "On-chain Identity".
+   */
+  agentId: string | number;
+  /**
+   * SKALE Base Sepolia RPC URL.
+   * Default: https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha
+   */
+  rpcUrl?: string;
+  /**
+   * ERC-8004 IdentityRegistry contract address.
+   * Default: process.env.ERC8004_IDENTITY_REGISTRY
+   */
+  identityRegistryAddress?: string;
+  /**
+   * ERC-8004 ReputationRegistry contract address.
+   * Default: process.env.ERC8004_REPUTATION_REGISTRY
+   */
+  reputationRegistryAddress?: string;
+  /**
+   * Cache TTL in ms (default: 5 minutes).
+   */
+  cacheTtlMs?: number;
+}
+
+interface CachedScore {
+  score: Record<string, unknown>;
+  expiresAt: number;
+}
+
+const SCORE_IDENTITY_ABI = [
+  'function ownerOf(uint256 tokenId) external view returns (address)',
+];
+
+const SCORE_FEEDBACK_TOPIC = ethers.id(
+  'NewFeedback(uint256,address,uint64,int128,uint8,string,string,string,string,string,bytes32)'
+);
+
+const SCORE_FEEDBACK_IFACE = new ethers.Interface([
+  'event NewFeedback(uint256 indexed agentId, address indexed giver, uint64 index, int128 value, uint8 valueDecimals, string tag1, string tag2, string endpoint, string feedbackURI, string responseURI, bytes32 feedbackHash)',
+]);
+
+const SCORE_BATCH = 1900;
+const SCORE_HISTORY = 10000;
+
+/**
+ * Score plugin — fetches ERC-8004 on-chain reputation for your API
+ * directly via RPC and injects it into the 402 response `extensions.score`.
+ *
+ * Agents can read the score **before paying**, enabling trust-based routing:
+ * - `feedbackCount` — number of on-chain feedback entries
+ * - `successRate` — 0–100 (% of successful calls)
+ * - `avgResponseMs` — average response time in milliseconds
+ * - `verified` — true if agentId is registered on-chain
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { score } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   plugins: [
+ *     score({ agentId: '5' }),
+ *   ],
+ * });
+ * ```
+ */
+export function score(config: ScorePluginConfig): RelaiPlugin {
+  const rawAgentId = config.agentId
+    ?? (typeof process !== 'undefined' ? process.env?.ERC8004_AGENT_ID : undefined);
+
+  if (!rawAgentId || String(rawAgentId) === 'undefined') {
+    console.warn('[relai:score] ERC8004_AGENT_ID not set — score plugin is a no-op');
+    return { name: 'score', async onInit() {} };
+  }
+
+  const agentId = String(rawAgentId);
+  const cacheTtlMs = config.cacheTtlMs ?? 5 * 60 * 1000;
+  const rpcUrl = config.rpcUrl
+    ?? (typeof process !== 'undefined' ? process.env?.ERC8004_RPC_URL : undefined)
+    ?? 'https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha';
+
+  let cached: CachedScore | null = null;
+
+  function getContracts() {
+    const identityAddress = config.identityRegistryAddress
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_IDENTITY_REGISTRY : undefined);
+    const reputationAddress = config.reputationRegistryAddress
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_REPUTATION_REGISTRY : undefined);
+    if (!identityAddress || !reputationAddress) return null;
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const identity = new ethers.Contract(identityAddress, SCORE_IDENTITY_ABI, provider);
+    return { provider, identity, reputationAddress };
+  }
+
+  async function fetchScore(): Promise<Record<string, unknown> | null> {
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.score;
+    }
+
+    const contracts = getContracts();
+    if (!contracts) {
+      console.warn(`[relai:score] ERC8004_IDENTITY_REGISTRY or ERC8004_REPUTATION_REGISTRY not set — score disabled`);
+      return null;
+    }
+
+    const { provider, identity, reputationAddress } = contracts;
+    const bigId = BigInt(agentId);
+
+    try {
+      let verified = false;
+      try {
+        const owner = await identity.ownerOf(bigId);
+        verified = !!owner;
+      } catch {
+        // Not registered
+      }
+
+      if (!verified) {
+        const scoreObj = { feedbackCount: 0, successRate: null, avgResponseMs: null, verified: false, agentId, source: 'erc8004-skale' };
+        cached = { score: scoreObj, expiresAt: Date.now() + cacheTtlMs };
+        return scoreObj;
+      }
+
+      const latest = await provider.getBlockNumber();
+      const agentIdTopic = ethers.zeroPadValue(ethers.toBeHex(bigId), 32);
+      const logs: any[] = [];
+
+      for (let from = Math.max(0, latest - SCORE_HISTORY); from <= latest; from += SCORE_BATCH) {
+        const to = Math.min(from + SCORE_BATCH - 1, latest);
+        const chunk = await provider.getLogs({
+          address: reputationAddress,
+          topics: [SCORE_FEEDBACK_TOPIC, agentIdTopic],
+          fromBlock: from,
+          toBlock: to,
+        });
+        logs.push(...chunk);
+      }
+
+      const srValues: number[] = [];
+      const rtValues: number[] = [];
+      const endpointMap: Record<string, { sr: number[]; rt: number[] }> = {};
+
+      for (const log of logs) {
+        try {
+          const p = SCORE_FEEDBACK_IFACE.parseLog({ topics: log.topics as string[], data: log.data });
+          if (!p) continue;
+          const val = Number(p.args.value) / Math.pow(10, Number(p.args.valueDecimals));
+          const ep: string = p.args.endpoint || '';
+          if (!endpointMap[ep]) endpointMap[ep] = { sr: [], rt: [] };
+          if (p.args.tag1 === 'successRate') { srValues.push(val); endpointMap[ep].sr.push(val); }
+          else if (p.args.tag1 === 'responseTime') { rtValues.push(val); endpointMap[ep].rt.push(val); }
+        } catch { /* skip */ }
+      }
+
+      const feedbackCount = srValues.length + rtValues.length;
+      const successRate = srValues.length
+        ? Math.round(srValues.reduce((a, b) => a + b, 0) / srValues.length)
+        : null;
+      const avgResponseMs = rtValues.length
+        ? Math.round(rtValues.reduce((a, b) => a + b, 0) / rtValues.length)
+        : null;
+
+      const endpoints: Record<string, { feedbackCount: number; successRate: number | null; avgResponseMs: number | null }> = {};
+      for (const [ep, { sr, rt }] of Object.entries(endpointMap)) {
+        endpoints[ep] = {
+          feedbackCount: sr.length + rt.length,
+          successRate: sr.length ? Math.round(sr.reduce((a, b) => a + b, 0) / sr.length) : null,
+          avgResponseMs: rt.length ? Math.round(rt.reduce((a, b) => a + b, 0) / rt.length) : null,
+        };
+      }
+
+      const scoreObj = { feedbackCount, successRate, avgResponseMs, verified: true, agentId, source: 'erc8004-skale', endpoints };
+      cached = { score: scoreObj, expiresAt: Date.now() + cacheTtlMs };
+      return scoreObj;
+    } catch (err) {
+      console.warn(`[relai:score] fetchScore RPC error for agentId=${agentId}:`, err);
+      return null;
+    }
+  }
+
+  return {
+    name: 'score',
+
+    async onInit() {
+      const s = await fetchScore();
+      if (s) {
+        console.log(`[relai:score] Initialized — agentId=${agentId}, feedback=${s.feedbackCount}, successRate=${s.successRate}%, avgResp=${s.avgResponseMs}ms`);
+      } else {
+        console.warn(`[relai:score] Could not load score for agentId=${agentId} — score will be omitted from 402 responses`);
+      }
+    },
+
+    enrich402Response(response: any, _ctx: PluginContext) {
+      const scoreData = cached?.score ?? null;
+      if (!scoreData) return response;
+
+      return {
+        ...response,
+        extensions: {
+          ...(response.extensions ?? {}),
+          score: scoreData,
+        },
+      };
+    },
+  };
+}
+
+// ============================================================================
+// Feedback Plugin
+// ============================================================================
+
+export interface FeedbackPluginConfig {
+  /**
+   * ERC-8004 agentId (NFT tokenId) for this API.
+   */
+  agentId: string | number;
+  /**
+   * Private key of the wallet that signs feedback transactions.
+   * The wallet must hold CREDIT tokens on SKALE Base to pay gas.
+   * Default: process.env.BACKEND_WALLET_PRIVATE_KEY
+   */
+  walletPrivateKey?: string;
+  /**
+   * SKALE Base Sepolia RPC URL.
+   * Default: process.env.ERC8004_RPC_URL or SKALE Base Sepolia public RPC.
+   */
+  rpcUrl?: string;
+  /**
+   * ERC-8004 ReputationRegistry contract address.
+   * Default: process.env.ERC8004_REPUTATION_REGISTRY
+   */
+  reputationRegistryAddress?: string;
+  /**
+   * Tag2 label for all feedback entries (default: 'x402').
+   */
+  tag2?: string;
+  /**
+   * Whether to submit successRate feedback (default: true).
+   * Value: 1 (success) or 0 (failure).
+   */
+  submitSuccessRate?: boolean;
+  /**
+   * Whether to submit responseTime feedback (default: true).
+   * Value: milliseconds elapsed since request start.
+   * Requires req.x402StartTime (set automatically if using Relai.protect()).
+   */
+  submitResponseTime?: boolean;
+}
+
+const FEEDBACK_REPUTATION_ABI = [
+  'function giveFeedback(uint256 agentId, int128 value, uint8 valueDecimals, string tag1, string tag2, string endpoint, string feedbackURI, bytes32 feedbackHash) external',
+];
+
+/**
+ * Feedback plugin — submits ERC-8004 on-chain reputation after every successful x402 settlement.
+ *
+ * Records `successRate` and `responseTime` signals to the ReputationRegistry on SKALE Base.
+ * This is the mechanism that **builds** the score that `score()` plugin later reads.
+ *
+ * Runs fire-and-forget — never blocks the response.
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { score, feedback } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'base',
+ *   plugins: [
+ *     score({ agentId: '5' }),
+ *     feedback({ agentId: '5' }), // needs BACKEND_WALLET_PRIVATE_KEY in env
+ *   ],
+ * });
+ * ```
+ */
+export function feedback(config: FeedbackPluginConfig): RelaiPlugin {
+  const rawAgentId = config.agentId
+    ?? (typeof process !== 'undefined' ? process.env?.ERC8004_AGENT_ID : undefined);
+
+  if (!rawAgentId || String(rawAgentId) === 'undefined') {
+    console.warn('[relai:feedback] ERC8004_AGENT_ID not set — feedback plugin is a no-op');
+    return { name: 'feedback', async onInit() {} };
+  }
+
+  const agentId = String(rawAgentId);
+  const tag2 = config.tag2 ?? 'x402';
+  const submitSuccessRate = config.submitSuccessRate ?? true;
+  const submitResponseTime = config.submitResponseTime ?? true;
+
+  let _reputation: any = null;
+
+  function getReputation() {
+    if (_reputation) return _reputation;
+
+    const privateKey = config.walletPrivateKey
+      ?? (typeof process !== 'undefined' ? process.env?.BACKEND_WALLET_PRIVATE_KEY : undefined);
+    const reputationAddress = config.reputationRegistryAddress
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_REPUTATION_REGISTRY : undefined);
+    const rpcUrl = config.rpcUrl
+      ?? (typeof process !== 'undefined' ? process.env?.ERC8004_RPC_URL : undefined)
+      ?? 'https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha';
+
+    if (!privateKey || !reputationAddress) return null;
+
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const signer = new ethers.Wallet(privateKey, provider);
+    _reputation = new ethers.Contract(reputationAddress, FEEDBACK_REPUTATION_ABI, signer);
+    return _reputation;
+  }
+
+  function submitAsync(tag1: string, value: number, valueDecimals: number, endpoint: string) {
+    const reputation = getReputation();
+    if (!reputation) return;
+
+    (async () => {
+      try {
+        const tx = await reputation.giveFeedback(
+          BigInt(agentId),
+          BigInt(Math.round(value)),
+          valueDecimals,
+          tag1,
+          tag2,
+          endpoint,
+          '',
+          ethers.ZeroHash,
+        );
+        console.log(`[relai:feedback] Submitted agentId=${agentId} tag=${tag1} value=${value} tx=${tx.hash}`);
+      } catch (err: any) {
+        console.warn(`[relai:feedback] giveFeedback failed (non-fatal): ${err?.message}`);
+      }
+    })();
+  }
+
+  return {
+    name: 'feedback',
+
+    async onInit() {
+      const reputation = getReputation();
+      if (reputation) {
+        console.log(`[relai:feedback] Initialized — agentId=${agentId}, submitSuccessRate=${submitSuccessRate}, submitResponseTime=${submitResponseTime}`);
+      } else {
+        console.warn(`[relai:feedback] BACKEND_WALLET_PRIVATE_KEY or ERC8004_REPUTATION_REGISTRY not set — feedback disabled`);
+      }
+    },
+
+    async afterSettled(req: any, result: SettleResult, ctx: PluginContext) {
+      const endpoint = ctx.path ?? '';
+
+      // successRate: 1 = success, 0 = failure
+      if (submitSuccessRate) {
+        submitAsync('successRate', result.success ? 1 : 0, 0, endpoint);
+      }
+
+      // responseTime in ms — use req.x402StartTime if available
+      if (submitResponseTime) {
+        const startTime = req?.x402StartTime ?? req?.x402StartedAt;
+        const responseTimeMs = startTime ? Date.now() - Number(startTime) : 0;
+        if (responseTimeMs > 0) {
+          submitAsync('responseTime', responseTimeMs, 0, endpoint);
+        }
+      }
+    },
+  };
+}
+
+// ============================================================================
+// Solana Feedback Plugin (8004-solana)
+// ============================================================================
+
+export interface SolanaFeedbackPluginConfig {
+  /**
+   * Solana MPL Core NFT public key (base58) of the registered agent.
+   * This is the `solanaAgentAsset` stored after calling /api/solana8004/register.
+   */
+  assetPubkey: string;
+  /**
+   * Private key of the feedback wallet — base58 or JSON array format.
+   * Should differ from the owner's registration wallet (avoids self-feedback restriction).
+   * Default: process.env.SOLANA_8004_FEEDBACK_KEY ?? process.env.SOLANA_8004_PRIVATE_KEY
+   */
+  feedbackWalletPrivateKey?: string;
+  /**
+   * Solana cluster to use.
+   * Default: process.env.SOLANA_8004_CLUSTER ?? 'mainnet-beta'
+   */
+  cluster?: 'mainnet-beta' | 'devnet';
+  /**
+   * Custom Solana RPC URL (Helius / QuickNode recommended).
+   * Default: process.env.SOLANA_8004_RPC_URL
+   */
+  rpcUrl?: string;
+  /**
+   * Whether to submit successRate feedback (default: true).
+   */
+  submitSuccessRate?: boolean;
+  /**
+   * Whether to submit responseTime feedback (default: true).
+   */
+  submitResponseTime?: boolean;
+}
+
+/**
+ * Solana Feedback plugin — submits 8004-solana on-chain reputation after x402 settlement.
+ *
+ * Uses the native Solana `8004-solana` program (MPL Core NFT registry),
+ * separate from the SKALE EVM ReputationRegistry used by `feedback()`.
+ *
+ * Requires `8004-solana` package to be installed:
+ * ```
+ * npm install 8004-solana
+ * ```
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { solanaFeedback } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'solana',
+ *   plugins: [
+ *     solanaFeedback({
+ *       assetPubkey: process.env.SOLANA_AGENT_ASSET!, // e.g. 'GH93tGR8...'
+ *     }),
+ *   ],
+ * });
+ * ```
+ */
+export function solanaFeedback(config: SolanaFeedbackPluginConfig): RelaiPlugin {
+  const assetPubkey = config.assetPubkey;
+  const submitSuccessRate = config.submitSuccessRate ?? true;
+  const submitResponseTime = config.submitResponseTime ?? true;
+
+  function getPrivateKey(): string | null {
+    return config.feedbackWalletPrivateKey
+      ?? (typeof process !== 'undefined'
+        ? process.env?.SOLANA_8004_FEEDBACK_KEY ?? process.env?.SOLANA_8004_PRIVATE_KEY
+        : undefined)
+      ?? null;
+  }
+
+  function getCluster(): string {
+    return config.cluster
+      ?? (typeof process !== 'undefined' ? process.env?.SOLANA_8004_CLUSTER : undefined)
+      ?? 'mainnet-beta';
+  }
+
+  function getRpcUrl(): string | undefined {
+    return config.rpcUrl
+      ?? (typeof process !== 'undefined' ? process.env?.SOLANA_8004_RPC_URL : undefined);
+  }
+
+  async function buildSDK(): Promise<any> {
+    let SolanaSDK: any;
+    try {
+      const mod = await import('8004-solana' as any);
+      SolanaSDK = mod.SolanaSDK;
+    } catch {
+      console.warn('[relai:solanaFeedback] 8004-solana package not installed — run: npm install 8004-solana');
+      return null;
+    }
+
+    const privateKeyRaw = getPrivateKey();
+    if (!privateKeyRaw) return null;
+
+    let secretKey: Uint8Array;
+    try {
+      const parsed = JSON.parse(privateKeyRaw);
+      if (Array.isArray(parsed)) {
+        secretKey = Uint8Array.from(parsed);
+      } else {
+        throw new Error('not array');
+      }
+    } catch {
+      // base58
+      try {
+        const bs58Mod = await import('bs58' as any);
+        const decode = bs58Mod.default?.decode ?? bs58Mod.decode;
+        secretKey = decode(privateKeyRaw);
+      } catch {
+        console.warn('[relai:solanaFeedback] Could not parse feedbackWalletPrivateKey');
+        return null;
+      }
+    }
+
+    const { Keypair } = await import('@solana/web3.js');
+    const signer = Keypair.fromSecretKey(secretKey);
+    const cluster = getCluster();
+    const rpcUrl = getRpcUrl();
+
+    return new SolanaSDK({ cluster, signer, ...(rpcUrl ? { rpcUrl } : {}) });
+  }
+
+  function submitAsync(isSuccess: boolean, responseTimeMs: number, endpoint: string) {
+    (async () => {
+      try {
+        const sdk = await buildSDK();
+        if (!sdk) return;
+
+        const { PublicKey } = await import('@solana/web3.js');
+        const pubkey = new PublicKey(assetPubkey);
+
+        if (submitSuccessRate) {
+          try {
+            const result = await sdk.giveFeedback(pubkey, {
+              value: String(isSuccess ? 10000 : 0),
+              tag1: 'successRate',
+              tag2: 'x402',
+              ...(endpoint ? { endpoint } : {}),
+            });
+            console.log(`[relai:solanaFeedback] successRate submitted asset=${assetPubkey.slice(0, 8)}... tx=${result.signature}`);
+          } catch (err: any) {
+            console.warn(`[relai:solanaFeedback] successRate failed (non-fatal): ${err?.message}`);
+          }
+        }
+
+        if (submitResponseTime && responseTimeMs > 0) {
+          try {
+            const result = await sdk.giveFeedback(pubkey, {
+              value: String(Math.round(responseTimeMs)),
+              tag1: 'responseTime',
+              tag2: 'x402',
+              ...(endpoint ? { endpoint } : {}),
+            });
+            console.log(`[relai:solanaFeedback] responseTime submitted asset=${assetPubkey.slice(0, 8)}... ms=${responseTimeMs} tx=${result.signature}`);
+          } catch (err: any) {
+            console.warn(`[relai:solanaFeedback] responseTime failed (non-fatal): ${err?.message}`);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[relai:solanaFeedback] feedback error (non-fatal): ${err?.message}`);
+      }
+    })();
+  }
+
+  return {
+    name: 'solanaFeedback',
+
+    async onInit() {
+      const privateKey = getPrivateKey();
+      if (!privateKey) {
+        console.warn('[relai:solanaFeedback] SOLANA_8004_FEEDBACK_KEY not set — Solana feedback disabled');
+        return;
+      }
+      try {
+        await import('8004-solana' as any);
+        console.log(`[relai:solanaFeedback] Initialized — asset=${assetPubkey.slice(0, 8)}... cluster=${getCluster()}`);
+      } catch {
+        console.warn('[relai:solanaFeedback] 8004-solana package not installed — run: npm install 8004-solana');
+      }
+    },
+
+    async afterSettled(req: any, result: SettleResult, ctx: PluginContext) {
+      const endpoint = ctx.path ?? '';
+      const startTime = req?.x402StartTime ?? req?.x402StartedAt;
+      const responseTimeMs = startTime ? Date.now() - Number(startTime) : 0;
+
+      submitAsync(result.success, responseTimeMs, endpoint);
+    },
+  };
+}
+
+// ============================================================================
+// Solana Score Plugin (8004-solana)
+// ============================================================================
+
+export interface SolanaScorePluginConfig {
+  /**
+   * Solana MPL Core NFT public key (base58) of the registered agent.
+   * This is the `solanaAgentAsset` stored after calling /api/solana8004/register.
+   */
+  assetPubkey: string;
+  /**
+   * Solana cluster to use.
+   * Default: process.env.SOLANA_8004_CLUSTER ?? 'mainnet-beta'
+   */
+  cluster?: 'mainnet-beta' | 'devnet';
+  /**
+   * Custom Solana RPC URL (Helius / QuickNode recommended).
+   * Default: process.env.SOLANA_8004_RPC_URL
+   */
+  rpcUrl?: string;
+  /**
+   * Cache TTL in ms (default: 5 minutes).
+   */
+  cacheTtlMs?: number;
+}
+
+/**
+ * Solana Score plugin — fetches 8004-solana on-chain reputation and injects it
+ * into the 402 response `extensions.score` before the client pays.
+ *
+ * Mirrors the EVM `score()` plugin but reads from the native Solana program
+ * instead of the SKALE EVM ReputationRegistry.
+ *
+ * @example
+ * ```typescript
+ * import Relai from '@relai-fi/x402/server';
+ * import { solanaScore } from '@relai-fi/x402/plugins';
+ *
+ * const relai = new Relai({
+ *   network: 'solana',
+ *   plugins: [
+ *     solanaScore({ assetPubkey: process.env.SOLANA_AGENT_ASSET! }),
+ *   ],
+ * });
+ * ```
+ */
+export function solanaScore(config: SolanaScorePluginConfig): RelaiPlugin {
+  const assetPubkey = config.assetPubkey;
+  const cacheTtlMs = config.cacheTtlMs ?? 5 * 60 * 1000;
+
+  if (!assetPubkey || String(assetPubkey) === 'undefined') {
+    console.warn('[relai:solanaScore] assetPubkey not set — solanaScore plugin is a no-op');
+    return { name: 'solanaScore', async onInit() {} };
+  }
+
+  let cached: CachedScore | null = null;
+
+  function getCluster(): string {
+    return config.cluster
+      ?? (typeof process !== 'undefined' ? process.env?.SOLANA_8004_CLUSTER : undefined)
+      ?? 'mainnet-beta';
+  }
+
+  function getRpcUrl(): string | undefined {
+    return config.rpcUrl
+      ?? (typeof process !== 'undefined' ? process.env?.SOLANA_8004_RPC_URL : undefined);
+  }
+
+  async function fetchScore(): Promise<Record<string, unknown> | null> {
+    if (cached && Date.now() < cached.expiresAt) return cached.score;
+
+    let SolanaSDK: any;
+    try {
+      const mod = await import('8004-solana' as any);
+      SolanaSDK = mod.SolanaSDK;
+    } catch {
+      console.warn('[relai:solanaScore] 8004-solana package not installed — run: npm install 8004-solana');
+      return null;
+    }
+
+    try {
+      const { PublicKey } = await import('@solana/web3.js');
+      const cluster = getCluster();
+      const rpcUrl = getRpcUrl();
+      const sdk = new SolanaSDK({ cluster, ...(rpcUrl ? { rpcUrl } : {}) });
+      const pubkey = new PublicKey(assetPubkey);
+
+      // Try getReputationSummary first (lightweight)
+      let feedbackCount = 0;
+      let successRate: number | null = null;
+      let avgResponseMs: number | null = null;
+      const endpoints: Record<string, { feedbackCount: number; successRate: number | null; avgResponseMs: number | null }> = {};
+
+      // Try to read all feedback for per-endpoint breakdown
+      let allFeedbacks: any[] = [];
+      try {
+        allFeedbacks = await sdk.readAllFeedback(pubkey);
+      } catch {
+        // fallback to summary only
+      }
+
+      if (allFeedbacks.length > 0) {
+        // Group by endpoint
+        const byEndpoint: Record<string, { successValues: number[]; responseTimes: number[] }> = {};
+        let globalSuccessValues: number[] = [];
+        let globalResponseTimes: number[] = [];
+
+        for (const entry of allFeedbacks) {
+          const tag1: string = entry.tag1 ?? '';
+          const rawValue = entry.value ?? entry.score ?? 0;
+          const value = typeof rawValue === 'bigint' ? Number(rawValue) : Number(rawValue);
+          const ep: string = entry.endpoint ?? '';
+
+          if (!byEndpoint[ep]) byEndpoint[ep] = { successValues: [], responseTimes: [] };
+
+          if (tag1 === 'successRate') {
+            globalSuccessValues.push(value);
+            byEndpoint[ep].successValues.push(value);
+          } else if (tag1 === 'responseTime') {
+            globalResponseTimes.push(value);
+            byEndpoint[ep].responseTimes.push(value);
+          }
+        }
+
+        feedbackCount = globalSuccessValues.length;
+        if (feedbackCount > 0) {
+          const avgSuccess = globalSuccessValues.reduce((a, b) => a + b, 0) / feedbackCount;
+          // value=10000 means success (100%), value=0 means failure
+          successRate = Math.round((avgSuccess / 10000) * 100);
+        }
+        if (globalResponseTimes.length > 0) {
+          avgResponseMs = Math.round(globalResponseTimes.reduce((a, b) => a + b, 0) / globalResponseTimes.length);
+        }
+
+        for (const [ep, data] of Object.entries(byEndpoint)) {
+          const epCount = data.successValues.length;
+          const epAvgSuccess = epCount > 0
+            ? data.successValues.reduce((a, b) => a + b, 0) / epCount
+            : null;
+          const epAvgMs = data.responseTimes.length > 0
+            ? Math.round(data.responseTimes.reduce((a, b) => a + b, 0) / data.responseTimes.length)
+            : null;
+          endpoints[ep || '/'] = {
+            feedbackCount: epCount,
+            successRate: epAvgSuccess !== null ? Math.round((epAvgSuccess / 10000) * 100) : null,
+            avgResponseMs: epAvgMs,
+          };
+        }
+      } else {
+        // Fallback to summary
+        try {
+          const summary = await sdk.getReputationSummary(pubkey);
+          feedbackCount = summary.count ?? 0;
+          if (feedbackCount > 0) {
+            const avg = summary.averageScore ?? 0;
+            successRate = Math.round((avg / 10000) * 100);
+          }
+        } catch {
+          // no data
+        }
+      }
+
+      const scoreObj = {
+        feedbackCount,
+        successRate,
+        avgResponseMs,
+        assetPubkey,
+        source: '8004-solana',
+        cluster,
+        ...(Object.keys(endpoints).length > 0 ? { endpoints } : {}),
+      };
+
+      cached = { score: scoreObj, expiresAt: Date.now() + cacheTtlMs };
+      return scoreObj;
+    } catch (err: any) {
+      console.warn(`[relai:solanaScore] fetch error (non-fatal): ${err?.message}`);
+      return null;
+    }
+  }
+
+  return {
+    name: 'solanaScore',
+
+    async onInit() {
+      const s = await fetchScore();
+      if (s) {
+        console.log(`[relai:solanaScore] Initialized — asset=${assetPubkey.slice(0, 8)}... feedbackCount=${(s as any).feedbackCount} cluster=${getCluster()}`);
+      } else {
+        console.warn(`[relai:solanaScore] Could not load score for asset=${assetPubkey.slice(0, 8)}... — score will be omitted from 402 responses`);
+      }
+    },
+
+    enrich402Response(response: any) {
+      const scoreData = cached?.score ?? null;
+      if (!scoreData) return response;
+      return {
+        ...response,
+        extensions: {
+          ...(response.extensions ?? {}),
+          solanaScore: scoreData,
+        },
+      };
     },
   };
 }
