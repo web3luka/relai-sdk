@@ -1318,7 +1318,15 @@ const SCORE_HISTORY = 10000;
  * ```
  */
 export function score(config: ScorePluginConfig): RelaiPlugin {
-  const agentId = String(config.agentId);
+  const rawAgentId = config.agentId
+    ?? (typeof process !== 'undefined' ? process.env?.ERC8004_AGENT_ID : undefined);
+
+  if (!rawAgentId || String(rawAgentId) === 'undefined') {
+    console.warn('[relai:score] ERC8004_AGENT_ID not set — score plugin is a no-op');
+    return { name: 'score', async onInit() {} };
+  }
+
+  const agentId = String(rawAgentId);
   const cacheTtlMs = config.cacheTtlMs ?? 5 * 60 * 1000;
   const rpcUrl = config.rpcUrl
     ?? (typeof process !== 'undefined' ? process.env?.ERC8004_RPC_URL : undefined)
@@ -1507,7 +1515,15 @@ const FEEDBACK_REPUTATION_ABI = [
  * ```
  */
 export function feedback(config: FeedbackPluginConfig): RelaiPlugin {
-  const agentId = String(config.agentId);
+  const rawAgentId = config.agentId
+    ?? (typeof process !== 'undefined' ? process.env?.ERC8004_AGENT_ID : undefined);
+
+  if (!rawAgentId || String(rawAgentId) === 'undefined') {
+    console.warn('[relai:feedback] ERC8004_AGENT_ID not set — feedback plugin is a no-op');
+    return { name: 'feedback', async onInit() {} };
+  }
+
+  const agentId = String(rawAgentId);
   const tag2 = config.tag2 ?? 'x402';
   const submitSuccessRate = config.submitSuccessRate ?? true;
   const submitResponseTime = config.submitResponseTime ?? true;
