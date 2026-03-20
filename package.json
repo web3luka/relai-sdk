@@ -1,7 +1,7 @@
 {
   "name": "@relai-fi/x402",
-  "version": "0.5.39",
-  "description": "Unified x402 payment SDK for Solana, Base, Avalanche, SKALE Base, SKALE BITE, Polygon, and Ethereum. Automatic 402 handling with zero gas fees. MPP support for Stripe, Tempo, and Solana on-chain payments.",
+  "version": "0.6.2",
+  "description": "Unified x402 payment SDK for Solana, Base, Avalanche, SKALE Base, SKALE BITE, Polygon, and Ethereum. Automatic 402 handling with zero gas fees.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -46,6 +46,8 @@
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
     "axios": "^1.6.7",
+    "bs58": "^6.0.0",
+    "ethers": "^6.16.0",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
@@ -102,6 +104,14 @@
       "types": "./dist/plugins.d.ts",
       "import": "./dist/plugins.js",
       "require": "./dist/plugins.cjs"
+    },
+    "./relay-feedback": {
+      "types": "./dist/relay-feedback.d.ts",
+      "import": "./dist/relay-feedback.js",
+      "require": "./dist/relay-feedback.cjs"
     }
+  },
+  "optionalDependencies": {
+    "8004-solana": "^0.8.2"
   }
 }

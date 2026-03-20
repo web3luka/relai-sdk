@@ -754,6 +754,146 @@ const relai = new Relai({
 | `onRefund` | `(event: RefundEvent) => void` | — | Callback on every refund event |
 | `refundOnSettlementFailure` | `boolean` | `true` | Also refund when settlement itself fails |
 
+### ERC-8004 Reputation Plugins
+
+Build verifiable on-chain reputation for your API using the [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) standard. Scores are stored on SKALE Base Sepolia (zero-cost transactions) and readable by any agent before payment.
+
+#### `score()` — Inject reputation into the 402 response
+
+Before an agent pays, it can see your API's live on-chain score in the `extensions.score` field of the 402 response. Fetches directly from the SKALE RPC node — no REST API.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { score } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'base',
+  plugins: [
+    score({ agentId: process.env.ERC8004_AGENT_ID! }),
+  ],
+});
+```
+
+The 402 response will include:
+```json
+{
+  "extensions": {
+    "score": {
+      "agentId": "5",
+      "feedbackCount": 142,
+      "successRate": 98.6,
+      "avgResponseMs": 312
+    }
+  }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `agentId` | `string \| number` | — | ERC-8004 NFT token ID from your dashboard |
+| `rpcUrl` | `string` | `process.env.ERC8004_RPC_URL` | SKALE Base Sepolia RPC URL |
+| `identityRegistryAddress` | `string` | `process.env.ERC8004_IDENTITY_REGISTRY` | IdentityRegistry contract address |
+| `reputationRegistryAddress` | `string` | `process.env.ERC8004_REPUTATION_REGISTRY` | ReputationRegistry contract address |
+| `cacheTtlMs` | `number` | `300000` | Score cache TTL (default: 5 min) |
+
+#### `feedback()` — Record your own API metrics on-chain
+
+Submit `successRate` and `responseTime` after every settled x402 payment. This is what builds the score that `score()` later reads.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { score, feedback } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'base',
+  plugins: [
+    score({ agentId: process.env.ERC8004_AGENT_ID! }),
+    feedback({ agentId: process.env.ERC8004_AGENT_ID! }),
+  ],
+});
+```
+
+Requires `BACKEND_WALLET_PRIVATE_KEY` — the wallet must hold CREDIT tokens on SKALE Base for gas.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `agentId` | `string \| number` | — | Your ERC-8004 agent token ID |
+| `walletPrivateKey` | `string` | `process.env.BACKEND_WALLET_PRIVATE_KEY` | EVM private key, needs CREDIT on SKALE |
+| `rpcUrl` | `string` | `process.env.ERC8004_RPC_URL` | SKALE RPC URL |
+| `reputationRegistryAddress` | `string` | `process.env.ERC8004_REPUTATION_REGISTRY` | Contract address |
+| `submitSuccessRate` | `boolean` | `true` | Submit 1/0 success signal |
+| `submitResponseTime` | `boolean` | `true` | Submit response time in ms |
+
+#### `solanaFeedback()` — Native Solana 8004-solana feedback
+
+For Solana APIs registered via `8004-solana` (MPL Core NFT). Requires `npm install 8004-solana`.
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { solanaFeedback } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'solana',
+  plugins: [
+    solanaFeedback({
+      assetPubkey: process.env.SOLANA_AGENT_ASSET!, // MPL Core NFT address
+    }),
+  ],
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `assetPubkey` | `string` | — | Solana MPL Core NFT address (`solanaAgentAsset`) |
+| `feedbackWalletPrivateKey` | `string` | `process.env.SOLANA_8004_FEEDBACK_KEY` | base58 or JSON array |
+| `cluster` | `'mainnet-beta' \| 'devnet'` | `process.env.SOLANA_8004_CLUSTER` | Solana cluster |
+| `rpcUrl` | `string` | `process.env.SOLANA_8004_RPC_URL` | Custom RPC (Helius / QuickNode) |
+
+#### `submitRelayFeedback()` — Third-party feedback utility
+
+If your server acts as a **relay or marketplace** that calls other APIs, use this standalone function to record feedback about those APIs. Uses a separate relay wallet to avoid self-feedback restrictions.
+
+```typescript
+import { submitRelayFeedback } from '@relai-fi/x402/plugins';
+
+// After calling an external API:
+const start = Date.now();
+const result = await fetch('https://other-api.com/v1/data');
+
+submitRelayFeedback({
+  agentId: '5',                        // target API's ERC-8004 agentId
+  success: result.ok,
+  responseTimeMs: Date.now() - start,
+  endpoint: '/v1/data',
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `agentId` | `string \| number` | — | ERC-8004 agentId of the API you called |
+| `success` | `boolean` | — | Whether the call succeeded |
+| `responseTimeMs` | `number` | `0` | Elapsed time in ms |
+| `endpoint` | `string` | `''` | Endpoint path |
+| `feedbackWalletPrivateKey` | `string` | `process.env.FEEDBACK_WALLET_PRIVATE_KEY` | Must differ from API owner key |
+
+#### Required environment variables (ERC-8004)
+
+```bash
+ERC8004_IDENTITY_REGISTRY=0x8724C768547d7fFb1722b13a84F21CCF5010641f
+ERC8004_REPUTATION_REGISTRY=0xe946A7F08d1CC0Ed0eC1fC131D0135d9c0Dd7d9D
+ERC8004_RPC_URL=https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha
+ERC8004_AGENT_ID=5                          # your agent NFT token ID
+
+BACKEND_WALLET_PRIVATE_KEY=0x...            # for feedback() — needs CREDIT on SKALE
+FEEDBACK_WALLET_PRIVATE_KEY=0x...           # for submitRelayFeedback() — different wallet
+
+# Solana 8004 (only if using solanaFeedback)
+SOLANA_AGENT_ASSET=GH93tGR8...             # MPL Core NFT pubkey
+SOLANA_8004_FEEDBACK_KEY=...               # base58 or JSON array
+SOLANA_8004_CLUSTER=mainnet-beta
+SOLANA_8004_RPC_URL=https://...
+```
+
 ### Combining Plugins
 
 Plugins run in array order. Combine them for layered protection:
@@ -768,6 +908,8 @@ const relai = new Relai({
     freeTier({ perBuyerLimit: 5, resetPeriod: 'daily' }), // 4. Free calls left?
     refund({ triggerCodes: [500, 502, 503] }),             // 5. Compensate on error
     bridge({ serviceKey: process.env.RELAI_SERVICE_KEY }), // 6. Cross-chain support
+    score({ agentId: process.env.ERC8004_AGENT_ID }),      // 7. Show reputation in 402
+    feedback({ agentId: process.env.ERC8004_AGENT_ID }),   // 8. Record metrics on-chain
   ],
 });
 ```

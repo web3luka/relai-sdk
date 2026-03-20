@@ -62,7 +62,7 @@ export interface RelaiServerConfig {
   /**
    * Optional MPP (Machine Payment Protocol) server handler.
    * When set, protect() accepts Authorization: Payment credentials
-   * (Tempo, Stripe, Solana MPP) alongside standard x402 payments.
+   * (Tempo, Stripe MPP) alongside standard x402 payments.
    */
   mpp?: MppServerHandler;
 }
@@ -803,6 +803,49 @@ export class Relai {
                 req.x402Paid = false;
                 req.x402Free = true;
                 req.x402Plugin = plugin.name;
+                // Still set up afterSettled interceptor so plugins (e.g. refund) can
+                // re-issue a credit if the endpoint fails on this free call too.
+                const skipPluginsWithHook = self.plugins.filter((p) => !!p.afterSettled);
+                if (skipPluginsWithHook.length > 0) {
+                  const skipCtx: PluginContext = {
+                    network,
+                    price: resolvedPrice,
+                    path: req.path || req.originalUrl || '/',
+                    method: (req.method || 'GET').toUpperCase(),
+                  };
+                  const skipResult: SettleResult = {
+                    success: true,
+                    payer: req.headers?.['x-wallet-address'] || req.headers?.['x-buyer-address'] || req.ip || req.socket?.remoteAddress || 'unknown',
+                    transaction: '',
+                  } as any;
+                  const originalJsonSkip = (res as any).json?.bind(res);
+                  const originalSendSkip = (res as any).send?.bind(res);
+                  let skipFired = false;
+                  const fireSkipAfterSettled = (statusCode: number) => {
+                    if (skipFired) return;
+                    skipFired = true;
+                    const resultWithStatus = { ...skipResult, statusCode };
+                    for (const p of skipPluginsWithHook) {
+                      p.afterSettled!(req, resultWithStatus, skipCtx).catch((e: unknown) => {
+                        console.warn(`[Relai] Plugin '${p.name}' afterSettled (skip) error:`, e);
+                      });
+                    }
+                  };
+                  if (typeof originalJsonSkip === 'function') {
+                    (res as any).json = function (body: unknown) {
+                      fireSkipAfterSettled(res.statusCode ?? 200);
+                      (res as any).json = originalJsonSkip;
+                      return originalJsonSkip(body);
+                    };
+                  }
+                  if (typeof originalSendSkip === 'function') {
+                    (res as any).send = function (body: unknown) {
+                      fireSkipAfterSettled(res.statusCode ?? 200);
+                      (res as any).send = originalSendSkip;
+                      return originalSendSkip(body);
+                    };
+                  }
+                }
                 return next();
               }
             } catch (pluginErr) {
@@ -1084,7 +1127,8 @@ export class Relai {
 
         options.onPaymentSettled?.(req, result);
 
-        // Plugin hooks: afterSettled
+        // Plugin hooks: afterSettled — called AFTER the handler responds so plugins
+        // can see the actual HTTP status code (e.g. circuit breaker, refund).
         if (self.plugins.length > 0) {
           const settleCtx: PluginContext = {
             network,
@@ -1092,12 +1136,35 @@ export class Relai {
             path: req.path || req.originalUrl || '/',
             method: (req.method || 'GET').toUpperCase(),
           };
-          for (const plugin of self.plugins) {
-            if (!plugin.afterSettled) continue;
-            try {
-              await plugin.afterSettled(req, result, settleCtx);
-            } catch (pluginErr) {
-              console.warn(`[Relai] Plugin '${plugin.name}' afterSettled error (non-blocking):`, pluginErr);
+          const pluginsWithHook = self.plugins.filter((p) => !!p.afterSettled);
+          if (pluginsWithHook.length > 0) {
+            // Wrap res.json / res.send to fire afterSettled with actual statusCode
+            const originalJson = (res as any).json?.bind(res);
+            const originalSend = (res as any).send?.bind(res);
+            let afterSettledFired = false;
+            const fireAfterSettled = (statusCode: number) => {
+              if (afterSettledFired) return;
+              afterSettledFired = true;
+              const resultWithStatus = { ...result, statusCode };
+              for (const plugin of pluginsWithHook) {
+                plugin.afterSettled!(req, resultWithStatus, settleCtx).catch((e: unknown) => {
+                  console.warn(`[Relai] Plugin '${plugin.name}' afterSettled error (non-blocking):`, e);
+                });
+              }
+            };
+            if (typeof originalJson === 'function') {
+              (res as any).json = function (body: unknown) {
+                fireAfterSettled(res.statusCode ?? 200);
+                (res as any).json = originalJson; // restore
+                return originalJson(body);
+              };
+            }
+            if (typeof originalSend === 'function') {
+              (res as any).send = function (body: unknown) {
+                fireAfterSettled(res.statusCode ?? 200);
+                (res as any).send = originalSend; // restore
+                return originalSend(body);
+              };
             }
           }
         }

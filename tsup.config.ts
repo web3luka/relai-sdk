@@ -10,6 +10,7 @@ export default defineConfig({
     'src/utils/index.ts',
     'src/management.ts',
     'src/plugins.ts',
+    'src/relay-feedback.ts',
   ],
   format: ['cjs', 'esm'],
   dts: true,
@@ -18,5 +19,5 @@ export default defineConfig({
   clean: true,
   minify: false,
   target: 'es2020',
-  external: ['react'],
+  external: ['react', '8004-solana'],
 });
