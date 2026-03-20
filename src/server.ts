@@ -62,7 +62,7 @@ export interface RelaiServerConfig {
   /**
    * Optional MPP (Machine Payment Protocol) server handler.
    * When set, protect() accepts Authorization: Payment credentials
-   * (Tempo, Stripe MPP) alongside standard x402 payments.
+   * (Tempo, Stripe, Solana MPP) alongside standard x402 payments.
    */
   mpp?: MppServerHandler;
 }

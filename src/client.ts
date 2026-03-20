@@ -31,12 +31,13 @@ import {
 export type X402NetworkSelectionMode = 'prefer_then_any' | 'strict_preferred';
 
 /**
- * MPP (Machine Payment Protocol) handler for automatic Tempo/Stripe payment.
+ * MPP (Machine Payment Protocol) handler for automatic Tempo/Stripe/Solana payment.
  * When provided, the client will detect WWW-Authenticate: Payment challenges
  * on 402 responses and use this handler to create credentials automatically.
  *
  * @example
  * ```typescript
+ * // Tempo example
  * import { Mppx, tempo } from 'mppx/client';
  * import { privateKeyToAccount } from 'viem/accounts';
  *
@@ -45,8 +46,15 @@ export type X402NetworkSelectionMode = 'prefer_then_any' | 'strict_preferred';
  *   polyfill: false,
  * });
  *
+ * // Solana example
+ * import { Mppx, solana } from '@solana/mpp/client';
+ *
+ * const mppx = Mppx.create({
+ *   methods: [solana.charge({ signer: solanaSigner })],
+ *   polyfill: false,
+ * });
+ *
  * const client = createX402Client({
- *   wallets: { evm: evmWallet },
  *   mpp: mppx,
  * });
  * ```
@@ -88,7 +96,7 @@ export interface X402ClientConfig {
   /**
    * Optional MPP (Machine Payment Protocol) handler.
    * When set, the client automatically handles WWW-Authenticate: Payment
-   * challenges (Tempo, Stripe) on 402 responses before falling back to x402.
+   * challenges (Tempo, Stripe, Solana) on 402 responses before falling back to x402.
    * Pass an mppx client instance (from `Mppx.create()`).
    */
   mpp?: MppHandler;
