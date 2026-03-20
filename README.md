@@ -1207,6 +1207,201 @@ Client                        Server                     Facilitator
 
 ---
 
+## MPP (Machine Payment Protocol)
+
+MPP is an alternative payment channel that works alongside x402. Instead of the client building and signing blockchain transactions, MPP delegates signing to specialized payment providers — simpler client code, same `protect()` middleware on the server.
+
+| | x402 | MPP |
+|---|------|-----|
+| **Payment flow** | Client builds tx (SPL / EIP-3009), signs, server settles via facilitator | Provider handles signing & broadcasting via challenge-response |
+| **Header protocol** | `X-PAYMENT` (base64 JSON) | `WWW-Authenticate: Payment` / `Authorization: Payment` |
+| **Supported providers** | — | Tempo (EVM), Solana (`@solana/mpp`), Stripe |
+
+When both are enabled the server returns a 402 with **both** an MPP challenge (`WWW-Authenticate`) and the standard x402 `accepts` body. The client tries MPP first, then falls back to x402.
+
+---
+
+### MPP Server Setup
+
+#### Tempo (EVM)
+
+```typescript
+import express from 'express';
+import Relai from '@relai-fi/x402/server';
+import { Mppx, tempo } from 'mppx/server';
+
+const TEMPO_USDC = '0x20C000000000000000000000b9537d11c60E8b50';
+
+const mppx = Mppx.create({
+  secretKey: process.env.MPP_SECRET_KEY!,
+  methods: [
+    tempo.charge({
+      recipient: '0xYourWallet',
+      currency: TEMPO_USDC,
+      decimals: 6,
+    }),
+  ],
+});
+
+const relai = new Relai({
+  network: 'base',
+  mpp: mppx,
+});
+
+const app = express();
+
+app.get('/api/data', relai.protect({
+  payTo: '0xYourWallet',
+  price: 0.01,
+}), (req, res) => {
+  res.json({ data: 'Paid via MPP Tempo or x402' });
+});
+```
+
+#### Solana (`@solana/mpp`)
+
+`@solana/mpp` expects amounts in **base units** (1 000 000 = 1 USDC), while the SDK passes USD. A thin wrapper with a handler cache is needed:
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { Mppx, solana } from '@solana/mpp/server';
+
+const SOLANA_USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const DECIMALS = 6;
+
+const mppx = Mppx.create({
+  secretKey: process.env.MPP_SECRET_KEY!,
+  methods: [
+    solana.charge({
+      recipient: 'YourSolanaWallet',
+      splToken: SOLANA_USDC,
+      decimals: DECIMALS,
+      network: 'mainnet-beta',
+      rpcUrl: process.env.SOLANA_RPC_URL,
+    }),
+  ],
+});
+
+// Wrap to convert USD → base units and cache handlers (mppx.charge is stateful)
+const handlerCache = new Map<string, ReturnType<typeof mppx.charge>>();
+const mppSolanaWrapper = {
+  charge(params: Record<string, unknown>) {
+    const usdAmount = parseFloat(params.amount as string);
+    const baseUnits = Math.round(usdAmount * 10 ** DECIMALS).toString();
+    if (!handlerCache.has(baseUnits)) {
+      handlerCache.set(baseUnits, mppx.charge({ ...params, amount: baseUnits }));
+    }
+    return handlerCache.get(baseUnits)!;
+  },
+};
+
+const relai = new Relai({
+  network: 'solana',
+  mpp: mppSolanaWrapper as any,
+});
+```
+
+---
+
+### MPP Client Setup
+
+#### Tempo (EVM)
+
+```typescript
+import { createX402Client } from '@relai-fi/x402/client';
+import { Mppx, tempo } from 'mppx/client';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const account = privateKeyToAccount(process.env.TEMPO_PRIVATE_KEY as `0x${string}`);
+
+const mppx = Mppx.create({
+  methods: [tempo.charge({ account })],
+  polyfill: false,
+  onChallenge: async (challenge, { createCredential }) => {
+    console.log(`Amount: ${challenge.request?.amount}`);
+    return await createCredential();
+  },
+});
+
+const client = createX402Client({ mpp: mppx });
+const response = await client.fetch('https://api.example.com/protected');
+```
+
+#### Solana
+
+```typescript
+import { createX402Client } from '@relai-fi/x402/client';
+import { Mppx, solana } from '@solana/mpp/client';
+import { createKeyPairSignerFromBytes } from '@solana/kit';
+import bs58 from 'bs58';
+
+const signer = await createKeyPairSignerFromBytes(
+  new Uint8Array(bs58.decode(process.env.SOLANA_PRIVATE_KEY!))
+);
+
+const mppx = Mppx.create({
+  methods: [solana.charge({ signer })],
+  polyfill: false,
+  onChallenge: async (challenge, { createCredential }) => {
+    console.log(`Amount: ${challenge.request?.amount}`);
+    return await createCredential();
+  },
+});
+
+const client = createX402Client({ mpp: mppx });
+const response = await client.fetch('https://api.example.com/protected');
+```
+
+---
+
+### MPP + Plugins
+
+All existing plugins work with MPP payments. `afterSettled` fires on both success and failure for both x402 and MPP:
+
+```typescript
+import { freeTier, shield, circuitBreaker, refund } from '@relai-fi/x402/plugins';
+
+const relai = new Relai({
+  network: 'base',
+  mpp: mppx,
+  plugins: [
+    shield({ healthUrl: 'https://my-api.com/health' }),
+    circuitBreaker({ failureThreshold: 5 }),
+    freeTier({ perBuyerLimit: 5, resetPeriod: 'daily' }),
+    refund({ triggerCodes: [500, 502, 503] }),
+  ],
+});
+```
+
+### MPP API Reference
+
+**Server — `MppServerHandler`**
+
+```typescript
+interface MppServerHandler {
+  charge(params: Record<string, unknown>): (request: Request) => Promise<MppChargeResult>;
+}
+
+type MppChargeResult = {
+  status: number;
+  challenge?: Response;                            // 402 with WWW-Authenticate header
+  withReceipt?: (response: Response) => Response;  // Attaches Payment-Receipt header
+  receipt?: { method?: string; reference?: string; status?: string };
+};
+```
+
+**Client — `MppHandler`**
+
+```typescript
+interface MppHandler {
+  createCredential(response: Response): Promise<string>;
+}
+```
+
+Both interfaces are exported from `@relai-fi/x402`.
+
+---
+
 ## Development
 
 ```bash
