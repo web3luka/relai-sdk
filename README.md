@@ -1301,9 +1301,22 @@ const relai = new Relai({
 });
 ```
 
-#### EVM — SKALE, Base, Polygon (built-in)
+#### EVM — SKALE, Base, Polygon, Avalanche, Ethereum, Telos (built-in)
 
-The SDK ships a built-in EVM MPP method that works with any EVM chain. SKALE chains are **gas-free**, making them ideal for zero-cost micropayments. The same USD→base-units wrapper pattern applies:
+The SDK ships a built-in EVM MPP method that works with any EVM chain. Supported chains:
+
+| Chain | Chain ID | Gas | Notes |
+|-------|----------|-----|-------|
+| SKALE Base | 1187947933 | Free | Gas-free USDC micropayments |
+| SKALE Base Sepolia | 324705682 | Free | Testnet |
+| SKALE BITE | 103698795 | Free | Gas-free, encrypted mempool |
+| Base | 8453 | ETH | Low fees (~$0.001/tx) |
+| Polygon | 137 | POL | Low fees |
+| Avalanche | 43114 | AVAX | Low fees |
+| Ethereum | 1 | ETH | Higher fees |
+| Telos | 40 | TLOS | Low fees |
+
+SKALE chains are **gas-free**, making them ideal for zero-cost micropayments. The same USD→base-units wrapper pattern applies:
 
 ```typescript
 import Relai from '@relai-fi/x402/server';
@@ -1396,7 +1409,7 @@ const client = createX402Client({ mpp: mppx });
 const response = await client.fetch('https://api.example.com/protected');
 ```
 
-#### EVM — SKALE, Base, Polygon (built-in)
+#### EVM — SKALE, Base, Polygon, Avalanche, Ethereum, Telos (built-in)
 
 ```typescript
 import { createX402Client } from '@relai-fi/x402/client';
