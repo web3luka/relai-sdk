@@ -84,3 +84,12 @@ export {
   fromAtomicUnits,
   formatUsd,
 } from './utils/payload-converter';
+
+// MPP EVM method (SKALE, Base, Polygon, etc.)
+export {
+  evmChargeMethod,
+  evmChargeServer,
+  evmChargeClient,
+  type EvmChargeConfig,
+  type EvmChargeClientConfig,
+} from './mpp/index';

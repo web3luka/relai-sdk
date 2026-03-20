@@ -1215,7 +1215,7 @@ MPP is an alternative payment channel that works alongside x402. Instead of the 
 |---|------|-----|
 | **Payment flow** | Client builds tx (SPL / EIP-3009), signs, server settles via facilitator | Provider handles signing & broadcasting via challenge-response |
 | **Header protocol** | `X-PAYMENT` (base64 JSON) | `WWW-Authenticate: Payment` / `Authorization: Payment` |
-| **Supported providers** | — | Tempo (EVM), Solana (`@solana/mpp`), Stripe |
+| **Supported providers** | — | Tempo (EVM), Solana (`@solana/mpp`), EVM/SKALE (built-in), Stripe |
 
 When both are enabled the server returns a 402 with **both** an MPP challenge (`WWW-Authenticate`) and the standard x402 `accepts` body. The client tries MPP first, then falls back to x402.
 
@@ -1301,6 +1301,63 @@ const relai = new Relai({
 });
 ```
 
+#### EVM — SKALE, Base, Polygon, Avalanche, Ethereum, Telos (built-in)
+
+The SDK ships a built-in EVM MPP method that works with any EVM chain. Supported chains:
+
+| Chain | Chain ID | Gas | Notes |
+|-------|----------|-----|-------|
+| SKALE Base | 1187947933 | Free | Gas-free USDC micropayments |
+| SKALE Base Sepolia | 324705682 | Free | Testnet |
+| SKALE BITE | 103698795 | Free | Gas-free, encrypted mempool |
+| Base | 8453 | ETH | Low fees (~$0.001/tx) |
+| Polygon | 137 | POL | Low fees |
+| Avalanche | 43114 | AVAX | Low fees |
+| Ethereum | 1 | ETH | Higher fees |
+| Telos | 40 | TLOS | Low fees |
+
+SKALE chains are **gas-free**, making them ideal for zero-cost micropayments. The same USD→base-units wrapper pattern applies:
+
+```typescript
+import Relai from '@relai-fi/x402/server';
+import { Mppx } from 'mppx/server';
+import { evmCharge } from '@relai-fi/x402/mpp/evm-server';
+
+const DECIMALS = 6;
+
+const mppx = Mppx.create({
+  secretKey: process.env.MPP_SECRET_KEY!,
+  methods: [
+    evmCharge({
+      recipient: '0xYourWallet',
+      tokenAddress: '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20', // USDC on SKALE Base
+      chainId: 1187947933,                                         // SKALE Base
+      rpcUrl: 'https://skale-base.skalenodes.com/v1/base',
+      decimals: DECIMALS,
+      network: 'skale-base',
+    }),
+  ],
+});
+
+// Same wrapper pattern as Solana
+const handlerCache = new Map<string, ReturnType<typeof mppx.charge>>();
+const mppEvmWrapper = {
+  charge(params: Record<string, unknown>) {
+    const usdAmount = parseFloat(params.amount as string);
+    const baseUnits = Math.round(usdAmount * 10 ** DECIMALS).toString();
+    if (!handlerCache.has(baseUnits)) {
+      handlerCache.set(baseUnits, mppx.charge({ ...params, amount: baseUnits }));
+    }
+    return handlerCache.get(baseUnits)!;
+  },
+};
+
+const relai = new Relai({
+  network: 'skale-base',
+  mpp: mppEvmWrapper as any,
+});
+```
+
 ---
 
 ### MPP Client Setup
@@ -1344,6 +1401,30 @@ const mppx = Mppx.create({
   polyfill: false,
   onChallenge: async (challenge, { createCredential }) => {
     console.log(`Amount: ${challenge.request?.amount}`);
+    return await createCredential();
+  },
+});
+
+const client = createX402Client({ mpp: mppx });
+const response = await client.fetch('https://api.example.com/protected');
+```
+
+#### EVM — SKALE, Base, Polygon, Avalanche, Ethereum, Telos (built-in)
+
+```typescript
+import { createX402Client } from '@relai-fi/x402/client';
+import { Mppx } from 'mppx/client';
+import { evmCharge } from '@relai-fi/x402/mpp/evm-client';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const account = privateKeyToAccount(process.env.EVM_PRIVATE_KEY as `0x${string}`);
+
+const mppx = Mppx.create({
+  methods: [evmCharge({ account })],
+  polyfill: false,
+  onChallenge: async (challenge, { createCredential }) => {
+    const req = challenge.request as any;
+    console.log(`Chain: ${req?.methodDetails?.network}, Amount: ${req?.amount}`);
     return await createCredential();
   },
 });

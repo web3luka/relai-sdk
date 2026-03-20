@@ -109,6 +109,21 @@
       "types": "./dist/relay-feedback.d.ts",
       "import": "./dist/relay-feedback.js",
       "require": "./dist/relay-feedback.cjs"
+    },
+    "./mpp/evm-server": {
+      "types": "./dist/mpp/evm-server.d.ts",
+      "import": "./dist/mpp/evm-server.js",
+      "require": "./dist/mpp/evm-server.cjs"
+    },
+    "./mpp/evm-client": {
+      "types": "./dist/mpp/evm-client.d.ts",
+      "import": "./dist/mpp/evm-client.js",
+      "require": "./dist/mpp/evm-client.cjs"
+    },
+    "./mpp/evm-method": {
+      "types": "./dist/mpp/evm-method.d.ts",
+      "import": "./dist/mpp/evm-method.js",
+      "require": "./dist/mpp/evm-method.cjs"
     }
   },
   "optionalDependencies": {
