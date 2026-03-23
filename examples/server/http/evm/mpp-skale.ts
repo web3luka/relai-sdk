@@ -9,10 +9,11 @@
  * Then test with the client:
  *   EVM_PRIVATE_KEY=0x... npx tsx examples/mpp-evm-client.ts
  */
+import "dotenv/config";
 import express from "express";
-import Relai from "../src/server";
+import Relai from "../../../../src/server";
 import { Mppx } from "mppx/server";
-import { evmCharge } from "../src/mpp/evm-server";
+import { evmCharge } from "../../../../src/mpp/evm-server";
 
 const PORT = process.env.PORT || 4404;
 const MPP_SECRET_KEY = process.env.MPP_SECRET_KEY || "test-secret-key-for-mpp-demo-32ch";

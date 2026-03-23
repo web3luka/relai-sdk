@@ -7,9 +7,10 @@
  * Then test with the client:
  *   TEMPO_PRIVATE_KEY=0x... npx tsx examples/mpp-tempo-client.ts
  */
+import "dotenv/config";
 import express from "express";
-import Relai from "../src/server";
-import { shield, circuitBreaker } from "../src/plugins";
+import Relai from "../../../../src/server";
+import { shield, circuitBreaker } from "../../../../src/plugins";
 import { Mppx, tempo } from "mppx/server";
 
 const PORT = process.env.PORT || 4402;
@@ -87,7 +88,7 @@ app.post(
   "/api/generate",
   relai.protect({
     payTo: RECIPIENT_WALLET,
-    price: 0.05, // $0.05
+    price: 0.01, // $0.01
     description: "AI generation endpoint",
   }),
   (req, res) => {

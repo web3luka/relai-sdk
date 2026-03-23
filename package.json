@@ -54,6 +54,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^20.19.24",
     "@types/react": "^18.0.0",
+    "dotenv": "^17.3.1",
     "eslint": "^8.0.0",
     "express": "^5.2.1",
     "mppx": "^0.4.7",

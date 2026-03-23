@@ -7,8 +7,9 @@
  * Then test with the client:
  *   SOLANA_PRIVATE_KEY=base58... npx tsx examples/mpp-solana-client.ts
  */
+import "dotenv/config";
 import express from "express";
-import Relai from "../src/server";
+import Relai from "../../../../src/server";
 import { Mppx, solana } from "@solana/mpp/server";
 
 // ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ const MPP_SECRET_KEY = process.env.MPP_SECRET_KEY || "test-secret-key-for-mpp-de
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || "";
 
 // The Solana wallet that receives USDC payments
-const RECIPIENT_WALLET = process.env.RECIPIENT_WALLET || "7UhYt3afz4FTk3kjn8H8NatHkFJ1EdJyLNEp4HXoEYYn";
+const RECIPIENT_WALLET = process.env.SOLANA_RECIPIENT_WALLET || process.env.RECIPIENT_WALLET || "7UhYt3afz4FTk3kjn8H8NatHkFJ1EdJyLNEp4HXoEYYn";
 
 // Solana USDC — devnet uses a different mint
 const SOLANA_USDC_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -124,7 +125,7 @@ app.post(
   "/api/generate",
   relai.protect({
     payTo: RECIPIENT_WALLET,
-    price: 0.05, // $0.05
+    price: 0.01, // $0.01
     description: "AI generation endpoint",
   }),
   (req, res) => {

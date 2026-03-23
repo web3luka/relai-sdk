@@ -764,6 +764,58 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     return null;
   }
 
+  /**
+   * Extract an MPP (WWW-Authenticate: Payment) challenge from a WS 402 error.
+   * The relay server forwards the upstream WWW-Authenticate value as `mppChallenge`
+   * on the error envelope, or inside `responseHeaders`.
+   */
+  function extractMppChallengeFromWsError(error: X402RelayWsError): string | null {
+    // Direct field on error
+    if (isRecord(error) && typeof (error as any).mppChallenge === 'string') {
+      return (error as any).mppChallenge as string;
+    }
+
+    // Nested inside data
+    if (isRecord(error.data) && typeof (error.data as any).mppChallenge === 'string') {
+      return (error.data as any).mppChallenge as string;
+    }
+
+    // From responseHeaders map
+    const metadata = isRecord(error) ? (error as any).responseHeaders : undefined;
+    if (isRecord(metadata)) {
+      for (const [key, value] of Object.entries(metadata)) {
+        if (key.toLowerCase() === 'www-authenticate' && typeof value === 'string') {
+          if (/^Payment\s+/i.test(value.trim())) {
+            return value;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Build a synthetic Response from a WS 402 error for mpp.createCredential().
+   * The MPP handler expects a standard Response with WWW-Authenticate header.
+   */
+  function buildSyntheticMppResponse(mppChallenge: string, wsError: X402RelayWsError): Response {
+    const headers = new Headers();
+    headers.set('WWW-Authenticate', mppChallenge);
+
+    // Forward any extra response headers the relay included
+    const responseHeaders = isRecord(wsError) ? (wsError as any).responseHeaders : undefined;
+    if (isRecord(responseHeaders)) {
+      for (const [key, value] of Object.entries(responseHeaders)) {
+        if (typeof value === 'string' && key.toLowerCase() !== 'www-authenticate') {
+          headers.set(key, value);
+        }
+      }
+    }
+
+    return new Response(null, { status: 402, headers });
+  }
+
   function buildWsResponse(wsResponse: X402RelayWsResponse): Response {
     const statusFromMetadata =
       isRecord(wsResponse.metadata) && typeof wsResponse.metadata.status === 'number'
@@ -1443,6 +1495,47 @@ export function createX402Client(config: X402ClientConfig): X402Client {
           throw new Error(wsPreflightResponse.error.message || '[relai-x402] WebSocket relay request failed');
         }
 
+        // ── MPP over WS: check for WWW-Authenticate: Payment challenge ────
+        if (mpp) {
+          const mppChallenge = extractMppChallengeFromWsError(wsPreflightResponse.error);
+          if (mppChallenge) {
+            log('MPP challenge detected in WS 402 response');
+            try {
+              const syntheticResponse = buildSyntheticMppResponse(mppChallenge, wsPreflightResponse.error);
+              const credential = await mpp.createCredential(syntheticResponse);
+              if (credential) {
+                log('MPP credential created, retrying via WS with Authorization: Payment');
+                wsPaymentPhaseStarted = true;
+                const wsMppResponse = await relayCallOverWebSocket({
+                  relayUrl: url,
+                  requestMethod,
+                  requestHeaders: {
+                    ...requestHeaders,
+                    'Authorization': credential.startsWith('Payment ') ? credential : `Payment ${credential}`,
+                  },
+                  requestBody,
+                  timeoutMs: relayWsPaymentTimeoutMs,
+                });
+
+                if (!wsMppResponse.error) {
+                  return buildWsResponse(wsMppResponse);
+                }
+
+                if (Number(wsMppResponse.error.code) !== 402) {
+                  throw new Error(wsMppResponse.error.message || '[relai-x402] WebSocket MPP retry failed');
+                }
+
+                log('MPP retry via WS still returned 402, falling through to x402 WS flow');
+                wsPaymentPhaseStarted = false;
+              }
+            } catch (mppWsErr) {
+              if (wsPaymentPhaseStarted) throw mppWsErr;
+              log(`MPP over WS failed (${mppWsErr instanceof Error ? mppWsErr.message : mppWsErr}), falling through to x402 WS flow`);
+            }
+          }
+        }
+        // ── End MPP over WS ───────────────────────────────────────────────
+
         const wsRequirements = extractPaymentRequirementsFromWsError(wsPreflightResponse.error);
         if (!wsRequirements) {
           throw new Error(
@@ -1463,6 +1556,20 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
         const wsSelected = selectAccept(wsAccepts);
         if (!wsSelected) {
+          // Check bridge extension for cross-chain routing (same as HTTP flow)
+          const wsBridge = getBridgeExtension(wsRequirements);
+          if (wsBridge && selectBridgeSource(wsBridge)) {
+            log('No direct wallet match in WS flow — attempting bridge extension');
+            wsPaymentPhaseStarted = true;
+            const bridgePaymentHeader = await executeBridgePayment(wsBridge, wsAccepts, wsRequirements, url);
+            log('Retrying with X-PAYMENT header (bridge via WS fallback to HTTP)');
+            // Bridge payment must go through HTTP (bridge settle is an HTTP POST)
+            // so we fall back to HTTP for the final retry with the bridge payment
+            return fetch(input, {
+              ...(stripInternalInit(init) || {}),
+              headers: { ...requestHeaders, 'X-PAYMENT': bridgePaymentHeader },
+            });
+          }
           throw new Error(buildNoWalletError(wsAccepts, true));
         }
 

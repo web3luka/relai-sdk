@@ -7,7 +7,8 @@
  * Start the server first:
  *   MPP_SECRET_KEY=my-secret npx tsx examples/mpp-solana-server.ts
  */
-import { createX402Client } from "../src/client";
+import "dotenv/config";
+import { createX402Client } from "../../../../src/client";
 import { Mppx, solana } from "@solana/mpp/client";
 import { createKeyPairSignerFromBytes } from "@solana/kit";
 // @ts-ignore — bs58 has no type declarations

@@ -7,9 +7,10 @@
  * Start the server first:
  *   MPP_SECRET_KEY=my-secret npx tsx examples/mpp-evm-server.ts
  */
-import { createX402Client } from "../src/client";
+import "dotenv/config";
+import { createX402Client } from "../../../../src/client";
 import { Mppx } from "mppx/client";
-import { evmCharge } from "../src/mpp/evm-client";
+import { evmCharge } from "../../../../src/mpp/evm-client";
 import { privateKeyToAccount } from "viem/accounts";
 
 const SERVER_URL = process.argv[2] || "http://localhost:4404";

@@ -11,13 +11,14 @@
  * Usage:
  *   TEMPO_PRIVATE_KEY=0x... npx tsx examples/mpp-plugins-test.ts
  */
+import "dotenv/config";
 import express from "express";
-import Relai from "../src/server";
-import type { MppServerHandler, MppChargeResult } from "../src/server";
-import { freeTier, shield, circuitBreaker, refund } from "../src/plugins";
-import type { FreeTierPlugin } from "../src/plugins";
+import Relai from "../../../src/server";
+import type { MppServerHandler, MppChargeResult } from "../../../src/server";
+import { freeTier, shield, circuitBreaker, refund } from "../../../src/plugins";
+import type { FreeTierPlugin } from "../../../src/plugins";
 import { Mppx, tempo } from "mppx/server";
-import { createX402Client } from "../src/client";
+import { createX402Client } from "../../../src/client";
 import { Mppx as MppxClient, tempo as tempoClient } from "mppx/client";
 import { privateKeyToAccount } from "viem/accounts";
 
