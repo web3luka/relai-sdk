@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createX402Client, type RelayWebSocketFactory, type RelayWebSocketLike } from '../client';
+import { createX402Client, type MppHandler, type RelayWebSocketFactory, type RelayWebSocketLike } from '../client';
 
 type RelayEnvelope = {
   id?: string;
@@ -709,5 +709,409 @@ describe('createX402Client relay websocket transport', () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(signTypedData).not.toHaveBeenCalled();
+  });
+
+  // ==========================================================================
+  // MPP over WebSocket tests
+  // ==========================================================================
+
+  it('handles MPP challenge over WS (preflight 402 with mppChallenge → credential → retry 200)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('fetch should not be called in WS MPP flow');
+    });
+
+    const mppCreateCredential = vi.fn().mockResolvedValue('Payment realm="mpp" token="cred-abc"');
+    const mppHandler: MppHandler = { createCredential: mppCreateCredential };
+    const relayRequests: RelayEnvelope[] = [];
+
+    const client = createX402Client({
+      mpp: mppHandler,
+      relayWs: {
+        enabled: true,
+        webSocketFactory: createMockRelayWebSocketFactory((envelope: RelayEnvelope) => {
+          relayRequests.push(envelope);
+
+          // First call: return 402 with MPP challenge
+          if (relayRequests.length === 1) {
+            return {
+              id: envelope.id,
+              error: {
+                code: 402,
+                message: 'Payment required',
+                mppChallenge: 'Payment realm="mpp" challenge="dGVzdC1jaGFsbGVuZ2U=" method="evm-charge"',
+                paymentRequired: {
+                  x402Version: 2,
+                  accepts: [
+                    {
+                      scheme: 'exact',
+                      network: 'eip155:8453',
+                      amount: '10000',
+                      asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+                      payTo: '0x0000000000000000000000000000000000000001',
+                    },
+                  ],
+                },
+              },
+            };
+          }
+
+          // Second call: MPP credential accepted → 200
+          return {
+            id: envelope.id,
+            result: {
+              ok: true,
+              transport: 'ws-mpp',
+            },
+            metadata: {
+              status: 200,
+            },
+          };
+        }),
+      },
+      verbose: false,
+    });
+
+    const response = await client.fetch('https://api.relai.fi/relay/1769629274857/v1/data', {
+      method: 'GET',
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, transport: 'ws-mpp' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // MPP handler was called with a synthetic Response
+    expect(mppCreateCredential).toHaveBeenCalledTimes(1);
+    const syntheticRes = mppCreateCredential.mock.calls[0][0] as Response;
+    expect(syntheticRes.status).toBe(402);
+    expect(syntheticRes.headers.get('www-authenticate')).toContain('Payment realm="mpp"');
+
+    // Two WS calls: preflight + MPP retry
+    expect(relayRequests).toHaveLength(2);
+    expect(relayRequests[0].params?.requestHeaders?.['Authorization']).toBeUndefined();
+    expect(relayRequests[1].params?.requestHeaders?.['Authorization']).toContain('Payment');
+  });
+
+  it('falls through to x402 WS flow when MPP challenge is present but handler returns null', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('fetch should not be called');
+    });
+    const signTypedData = vi.fn().mockResolvedValue(`0x${'66'.repeat(65)}`);
+    const mppCreateCredential = vi.fn().mockResolvedValue(null);
+    const mppHandler: MppHandler = { createCredential: mppCreateCredential };
+    const relayRequests: RelayEnvelope[] = [];
+
+    const client = createX402Client({
+      wallets: {
+        evm: {
+          address: '0x00000000000000000000000000000000000000aa',
+          signTypedData,
+        },
+      },
+      mpp: mppHandler,
+      relayWs: {
+        enabled: true,
+        webSocketFactory: createMockRelayWebSocketFactory((envelope: RelayEnvelope) => {
+          relayRequests.push(envelope);
+
+          // Always return 402 with both MPP and x402 info
+          if (!envelope.payment) {
+            return {
+              id: envelope.id,
+              error: {
+                code: 402,
+                message: 'Payment required',
+                mppChallenge: 'Payment realm="mpp" challenge="abc" method="evm-charge"',
+                paymentRequired: {
+                  x402Version: 2,
+                  accepts: [
+                    {
+                      scheme: 'exact',
+                      network: 'eip155:8453',
+                      amount: '5000',
+                      asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+                      payTo: '0x0000000000000000000000000000000000000001',
+                      extra: {
+                        relayerContract: '0x457Db7ceBAdaF6A043AcE833de95C46E982cEdC8',
+                        domainName: 'A402',
+                        domainVersion: '1',
+                      },
+                    },
+                  ],
+                },
+              },
+            };
+          }
+
+          // x402 payment received → 200
+          return {
+            id: envelope.id,
+            result: { ok: true, transport: 'ws-x402-fallback' },
+            paymentResponse: { transaction: '0xdef456', network: 'eip155:8453' },
+            metadata: { status: 200 },
+          };
+        }),
+      },
+      verbose: false,
+    });
+
+    const response = await client.fetch('https://api.relai.fi/relay/123/v1/data', {
+      method: 'GET',
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, transport: 'ws-x402-fallback' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // MPP was attempted but returned null → fell through to x402
+    expect(mppCreateCredential).toHaveBeenCalledTimes(1);
+    expect(signTypedData).toHaveBeenCalledTimes(1);
+
+    // 2 WS calls: preflight + x402 paid retry (MPP didn't produce a retry)
+    expect(relayRequests).toHaveLength(2);
+    expect(relayRequests[1].payment).toBeDefined();
+  });
+
+  it('falls through to x402 WS flow when MPP handler throws', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('fetch should not be called');
+    });
+    const signTypedData = vi.fn().mockResolvedValue(`0x${'77'.repeat(65)}`);
+    const mppCreateCredential = vi.fn().mockRejectedValue(new Error('MPP signing failed'));
+    const mppHandler: MppHandler = { createCredential: mppCreateCredential };
+    const relayRequests: RelayEnvelope[] = [];
+
+    const client = createX402Client({
+      wallets: {
+        evm: {
+          address: '0x00000000000000000000000000000000000000aa',
+          signTypedData,
+        },
+      },
+      mpp: mppHandler,
+      relayWs: {
+        enabled: true,
+        webSocketFactory: createMockRelayWebSocketFactory((envelope: RelayEnvelope) => {
+          relayRequests.push(envelope);
+
+          if (!envelope.payment) {
+            return {
+              id: envelope.id,
+              error: {
+                code: 402,
+                message: 'Payment required',
+                mppChallenge: 'Payment realm="mpp" challenge="xyz" method="tempo-charge"',
+                paymentRequired: {
+                  x402Version: 2,
+                  accepts: [
+                    {
+                      scheme: 'exact',
+                      network: 'eip155:8453',
+                      amount: '8000',
+                      asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+                      payTo: '0x0000000000000000000000000000000000000001',
+                      extra: {
+                        relayerContract: '0x457Db7ceBAdaF6A043AcE833de95C46E982cEdC8',
+                        domainName: 'A402',
+                        domainVersion: '1',
+                      },
+                    },
+                  ],
+                },
+              },
+            };
+          }
+
+          return {
+            id: envelope.id,
+            result: { ok: true, transport: 'ws-x402-after-mpp-error' },
+            paymentResponse: { transaction: '0xaaa' },
+            metadata: { status: 200 },
+          };
+        }),
+      },
+      verbose: false,
+    });
+
+    const response = await client.fetch('https://api.relai.fi/relay/456/v1/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hello: true }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, transport: 'ws-x402-after-mpp-error' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // MPP failed → x402 took over
+    expect(mppCreateCredential).toHaveBeenCalledTimes(1);
+    expect(signTypedData).toHaveBeenCalledTimes(1);
+    expect(relayRequests).toHaveLength(2);
+  });
+
+  it('does not fall back to x402 when MPP WS retry returns a non-402 error', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('fetch should not be called');
+    });
+    const mppCreateCredential = vi.fn().mockResolvedValue('Payment token="mpp-cred"');
+    const mppHandler: MppHandler = { createCredential: mppCreateCredential };
+    const relayRequests: RelayEnvelope[] = [];
+
+    const client = createX402Client({
+      mpp: mppHandler,
+      relayWs: {
+        enabled: true,
+        webSocketFactory: createMockRelayWebSocketFactory((envelope: RelayEnvelope) => {
+          relayRequests.push(envelope);
+
+          if (relayRequests.length === 1) {
+            return {
+              id: envelope.id,
+              error: {
+                code: 402,
+                message: 'Payment required',
+                mppChallenge: 'Payment realm="mpp" challenge="abc" method="evm-charge"',
+              },
+            };
+          }
+
+          // MPP retry fails with 403 (not 402)
+          return {
+            id: envelope.id,
+            error: {
+              code: 403,
+              message: 'MPP credential rejected',
+            },
+          };
+        }),
+      },
+      verbose: false,
+    });
+
+    await expect(
+      client.fetch('https://api.relai.fi/relay/789/v1/data', { method: 'GET' })
+    ).rejects.toThrow('MPP credential rejected');
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(relayRequests).toHaveLength(2);
+  });
+
+  it('handles MPP challenge from responseHeaders in WS error', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('fetch should not be called');
+    });
+    const mppCreateCredential = vi.fn().mockResolvedValue('Payment token="from-headers"');
+    const mppHandler: MppHandler = { createCredential: mppCreateCredential };
+    const relayRequests: RelayEnvelope[] = [];
+
+    const client = createX402Client({
+      mpp: mppHandler,
+      relayWs: {
+        enabled: true,
+        webSocketFactory: createMockRelayWebSocketFactory((envelope: RelayEnvelope) => {
+          relayRequests.push(envelope);
+
+          if (relayRequests.length === 1) {
+            return {
+              id: envelope.id,
+              error: {
+                code: 402,
+                message: 'Payment required',
+                // MPP challenge in responseHeaders (alternative format)
+                responseHeaders: {
+                  'WWW-Authenticate': 'Payment realm="mpp" challenge="headers-test" method="evm-charge"',
+                },
+              },
+            };
+          }
+
+          return {
+            id: envelope.id,
+            result: { ok: true, source: 'response-headers' },
+            metadata: { status: 200 },
+          };
+        }),
+      },
+      verbose: false,
+    });
+
+    const response = await client.fetch('https://api.relai.fi/relay/100/v1/test', {
+      method: 'GET',
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, source: 'response-headers' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mppCreateCredential).toHaveBeenCalledTimes(1);
+    expect(relayRequests).toHaveLength(2);
+  });
+
+  it('skips MPP when no mpp handler is configured even if mppChallenge is present', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('fetch should not be called');
+    });
+    const signTypedData = vi.fn().mockResolvedValue(`0x${'88'.repeat(65)}`);
+    const relayRequests: RelayEnvelope[] = [];
+
+    const client = createX402Client({
+      wallets: {
+        evm: {
+          address: '0x00000000000000000000000000000000000000aa',
+          signTypedData,
+        },
+      },
+      // No mpp handler — should go straight to x402
+      relayWs: {
+        enabled: true,
+        webSocketFactory: createMockRelayWebSocketFactory((envelope: RelayEnvelope) => {
+          relayRequests.push(envelope);
+
+          if (!envelope.payment) {
+            return {
+              id: envelope.id,
+              error: {
+                code: 402,
+                message: 'Payment required',
+                mppChallenge: 'Payment realm="mpp" challenge="ignored" method="evm-charge"',
+                paymentRequired: {
+                  x402Version: 2,
+                  accepts: [
+                    {
+                      scheme: 'exact',
+                      network: 'eip155:8453',
+                      amount: '3000',
+                      asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+                      payTo: '0x0000000000000000000000000000000000000001',
+                      extra: {
+                        relayerContract: '0x457Db7ceBAdaF6A043AcE833de95C46E982cEdC8',
+                        domainName: 'A402',
+                        domainVersion: '1',
+                      },
+                    },
+                  ],
+                },
+              },
+            };
+          }
+
+          return {
+            id: envelope.id,
+            result: { ok: true, transport: 'ws-x402-no-mpp' },
+            paymentResponse: { transaction: '0xbbb' },
+            metadata: { status: 200 },
+          };
+        }),
+      },
+      verbose: false,
+    });
+
+    const response = await client.fetch('https://api.relai.fi/relay/999/v1/test', {
+      method: 'GET',
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, transport: 'ws-x402-no-mpp' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(signTypedData).toHaveBeenCalledTimes(1);
+    expect(relayRequests).toHaveLength(2);
   });
 });

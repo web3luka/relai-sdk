@@ -7,7 +7,8 @@
  * Start the server first:
  *   MPP_SECRET_KEY=my-secret npx tsx examples/mpp-tempo-server.ts
  */
-import { createX402Client } from "../src/client";
+import "dotenv/config";
+import { createX402Client } from "../../../../src/client";
 import { Mppx, tempo } from "mppx/client";
 import { privateKeyToAccount } from "viem/accounts";
 

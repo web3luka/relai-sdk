@@ -498,7 +498,10 @@ export class Relai {
                     this.facilitatorUrl.includes('relai');
     
     if (isRelAI) {
-      const relaiFeePayer = '0x1892f72fdB3A966b2AD8595aA5f7741Ef72d6085';
+      const isSolanaNetwork = caip2.startsWith('solana:');
+      const relaiFeePayer = isSolanaNetwork
+        ? '4x4ZhcqiT1FnirM8Ne97iVupkN4NcQgc2YYbE2jDZbZn'
+        : '0x1892f72fdB3A966b2AD8595aA5f7741Ef72d6085';
       this.feePayerCache.set(caip2, relaiFeePayer);
       return relaiFeePayer;
     }
