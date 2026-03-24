@@ -1483,6 +1483,122 @@ Both interfaces are exported from `@relai-fi/x402`.
 
 ---
 
+## Cross-Chain Bridge Flows
+
+The SDK supports transparent cross-chain payments via the RelAI bridge. There are two approaches depending on who manages the bridge logic — the **client** or the **server**.
+
+### x402 Auto-Bridge (client-side)
+
+The server is a standard x402 server. The client has a wallet on a different chain and uses `bridge: { enabled: true }` to auto-bridge.
+
+```mermaid
+sequenceDiagram
+    participant Client as Client (Solana)
+    participant Server as Server (Base)
+    participant Bridge as RelAI Bridge API
+    participant Facilitator as Facilitator
+
+    Client->>Server: GET /api/data
+    Server-->>Client: 402 (accepts: Base USDC)
+
+    Note over Client: No Base wallet → auto-bridge
+
+    Client->>Bridge: GET /bridge/info
+    Bridge-->>Client: source chains, payTo, fees
+
+    Client->>Client: Build Solana SPL transfer to bridge payTo
+    Client->>Bridge: POST /bridge/settle (sourcePayment, targetAccept)
+    Bridge->>Bridge: Co-sign & broadcast Solana tx
+    Bridge->>Bridge: Sign EIP-3009 authorization (Base)
+    Bridge-->>Client: xPayment (base64)
+
+    Client->>Server: GET /api/data + X-PAYMENT header
+    Server->>Facilitator: POST /settle (paymentPayload)
+    Facilitator->>Facilitator: Execute transferWithAuthorization on Base
+    Facilitator-->>Server: tx hash
+    Server-->>Client: 200 OK + data
+```
+
+### MPP Client-Side Bridge (evmChargeWithBridge)
+
+The server exposes a standard `evm/charge` MPP method. The client detects it's on a different chain and bridges transparently — the server never knows.
+
+```mermaid
+sequenceDiagram
+    participant Client as Client (Tempo)
+    participant Server as Server (SKALE)
+    participant Bridge as RelAI Bridge API
+    participant Facilitator as Facilitator
+
+    Client->>Server: GET /api/data
+    Server-->>Client: 402 + WWW-Authenticate: Payment (evm/charge, chainId=SKALE)
+
+    Note over Client: Source chain ≠ target chain → bridge
+
+    Client->>Bridge: GET /bridge/info
+    Bridge-->>Client: source chains, payTo, fees
+
+    Client->>Client: ERC-20 transfer on Tempo → bridge payTo
+    Client->>Client: Sign settle message (ECDSA)
+    Client->>Bridge: POST /bridge/settle (sourceTxHash, signature, targetAccept)
+    Bridge->>Bridge: Verify source tx on-chain + signature
+    Bridge->>Bridge: Sign EIP-3009 authorization (SKALE)
+    Bridge-->>Client: xPayment + targetTxId=pending
+
+    Client->>Facilitator: POST /settle (paymentPayload, paymentRequirements)
+    Facilitator->>Facilitator: Execute transferWithAuthorization on SKALE
+    Facilitator-->>Client: tx hash (SKALE)
+
+    Client->>Server: GET /api/data + Authorization: Payment (hash=SKALE tx)
+    Server->>Server: Verify ERC-20 Transfer on SKALE (standard evm/charge verify)
+    Server-->>Client: 200 OK + data
+```
+
+### MPP Server-Side Bridge (bridge/charge method)
+
+The server explicitly exposes a `bridge/charge` method alongside its direct method. The client picks bridge/charge when it can't pay directly. Use this when the target chain is not EVM (e.g. Solana).
+
+```mermaid
+sequenceDiagram
+    participant Client as Client (Tempo)
+    participant Server as Server (SKALE)
+    participant Bridge as RelAI Bridge API
+    participant Facilitator as Facilitator
+
+    Client->>Server: GET /api/data
+    Server->>Bridge: GET /bridge/info (auto-discover)
+    Server-->>Client: 402 + WWW-Authenticate: Payment<br/>(evm/charge + bridge/charge)
+
+    Note over Client: Can't match evm/charge → picks bridge/charge
+
+    Client->>Client: ERC-20 transfer on Tempo → bridge payTo
+    Client->>Client: Sign settle message (ECDSA)
+    Client->>Bridge: POST /bridge/settle (sourceTxHash, signature, targetAccept)
+    Bridge->>Bridge: Verify source tx on-chain + signature
+    Bridge->>Bridge: Sign EIP-3009 authorization (SKALE)
+    Bridge-->>Client: xPayment + targetTxId=pending
+
+    Client->>Facilitator: POST /settle (paymentPayload, paymentRequirements)
+    Facilitator->>Facilitator: Execute transferWithAuthorization on SKALE
+    Facilitator-->>Client: tx hash (SKALE)
+
+    Client->>Server: Authorization: Payment (targetTxHash=SKALE tx)
+    Server->>Server: bridge/charge verify() — check ERC-20 Transfer on SKALE
+    Server-->>Client: 200 OK + data
+```
+
+### When to use which approach
+
+| Approach | Server config | Client config | Best for |
+|----------|--------------|---------------|----------|
+| **x402 auto-bridge** | Standard x402 (no change) | `bridge: { enabled: true }` | Solana client → EVM server |
+| **MPP client-side** | Standard `evm/charge` (no change) | `evmChargeWithBridge()` | EVM client → different EVM server |
+| **MPP server-side** | `evm/charge` + `bridge/charge` | `bridgeCharge()` client | Any client → Solana server, or when server wants to control bridge options |
+
+See [`examples/bridge/`](./examples/bridge/) for runnable examples of each approach.
+
+---
+
 ## Development
 
 ```bash

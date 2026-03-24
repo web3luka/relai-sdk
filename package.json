@@ -125,6 +125,36 @@
       "types": "./dist/mpp/evm-method.d.ts",
       "import": "./dist/mpp/evm-method.js",
       "require": "./dist/mpp/evm-method.cjs"
+    },
+    "./mpp/bridge-server": {
+      "types": "./dist/mpp/bridge-server.d.ts",
+      "import": "./dist/mpp/bridge-server.js",
+      "require": "./dist/mpp/bridge-server.cjs"
+    },
+    "./mpp/bridge-client": {
+      "types": "./dist/mpp/bridge-client.d.ts",
+      "import": "./dist/mpp/bridge-client.js",
+      "require": "./dist/mpp/bridge-client.cjs"
+    },
+    "./mpp/bridge-method": {
+      "types": "./dist/mpp/bridge-method.d.ts",
+      "import": "./dist/mpp/bridge-method.js",
+      "require": "./dist/mpp/bridge-method.cjs"
+    },
+    "./mpp/verify-spl": {
+      "types": "./dist/mpp/verify-spl.d.ts",
+      "import": "./dist/mpp/verify-spl.js",
+      "require": "./dist/mpp/verify-spl.cjs"
+    },
+    "./mpp/with-bridge": {
+      "types": "./dist/mpp/with-bridge.d.ts",
+      "import": "./dist/mpp/with-bridge.js",
+      "require": "./dist/mpp/with-bridge.cjs"
+    },
+    "./bridge": {
+      "types": "./dist/bridge.d.ts",
+      "import": "./dist/bridge.js",
+      "require": "./dist/bridge.cjs"
     }
   },
   "optionalDependencies": {
