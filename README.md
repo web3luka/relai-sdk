@@ -1599,6 +1599,141 @@ See [`examples/bridge/`](./examples/bridge/) for runnable examples of each appro
 
 ---
 
+## Payment Codes
+
+BLIK-style one-time payment codes — pre-signed EIP-3009 tokens that can be generated in advance and redeemed later, without a wallet at redemption time. Ideal for AI agents and walletless buyers.
+
+```typescript
+import {
+  createPrivateKeySigner,
+  generatePaymentCode,
+  generatePaymentCodesBatch,
+  redeemPaymentCode,
+  getPaymentCode,
+  cancelPaymentCode,
+} from '@relai-fi/x402';
+import { ethers } from 'ethers';
+
+const config = { facilitatorUrl: 'https://relai.fi/facilitator' };
+
+// ── Create a signer from a private key (agent / server-side) ──────────────
+const signer = createPrivateKeySigner(process.env.AGENT_PRIVATE_KEY!);
+
+// ── Generate a single payment code ($10 USDC, expires in 24 h) ───────────
+const code = await generatePaymentCode(config, signer, {
+  amount:  10_000_000,       // $10.00 in µUSDC
+  network: 'base-sepolia',
+});
+console.log('Code:', code.code);  // "ABCD1234"
+
+// ── Batch generate 5 codes (requires API key) ─────────────────────────────
+const batch = await generatePaymentCodesBatch(config, signer, {
+  amount:   5_000_000,
+  network:  'base-sepolia',
+  count:    5,
+  apiKey:   process.env.RELAI_API_KEY!,
+});
+
+// ── Check status ──────────────────────────────────────────────────────────
+const status = await getPaymentCode(config, 'ABCD1234');
+console.log(status.redeemed, status.expired, status.value);
+
+// ── Redeem (settle USDC to a payee) ──────────────────────────────────────
+const result = await redeemPaymentCode(config, 'ABCD1234', {
+  payee: '0xMerchantWallet',
+});
+console.log('Explorer:', result.explorerUrl);
+
+// ── Cancel before use ─────────────────────────────────────────────────────
+await cancelPaymentCode(config, 'ABCD1234');
+```
+
+### `generatePaymentCode` options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `amount` | `number` | — | Amount in µUSDC (1 USDC = 1 000 000) |
+| `network` | `string` | `'base-sepolia'` | Settlement network |
+| `description` | `string` | — | Optional note stored with the code |
+| `payee` | `string` | — | Lock the code to a specific payee address |
+| `ttl` | `number` | `86400` | Expiry in seconds (default: 24 h) |
+
+### `RedeemResult` fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | Settlement succeeded |
+| `code` | `string` | The redeemed code |
+| `l2TxHash` | `string` | On-chain tx hash |
+| `explorerUrl` | `string` | Block explorer link |
+| `amount` | `string` | Amount settled (µUSDC) |
+| `change` | `string?` | Remainder returned to buyer (µUSDC), if partial |
+| `changeMode` | `'code' \| 'wallet'?` | How change was returned |
+| `changeCode` | `string?` | New payment code for change (when `changeMode === 'code'`) |
+
+---
+
+## Payment Requests
+
+Merchant-initiated invoices — the merchant creates a payment request, shares the code or link, and any buyer (or agent) can pay it.
+
+```typescript
+import {
+  createPayRequest,
+  getPayRequest,
+  payPayRequest,
+  payPayRequestWithCode,
+} from '@relai-fi/x402';
+
+const config = { facilitatorUrl: 'https://relai.fi/facilitator' };
+
+// ── Merchant: create an invoice ───────────────────────────────────────────
+const req = await createPayRequest(config, {
+  to:          '0xMerchantWallet',
+  amount:      5_000_000,       // $5.00 USDC
+  network:     'base-sepolia',
+  description: 'Order #42',
+  ttl:         3600,            // expires in 1 h
+});
+console.log('Invoice code:', req.code);    // "MW78SGTW"
+console.log('Pay URL:', req.payUrl);       // "https://relai.fi/pay#MW78SGTW"
+
+// ── Buyer: read the request ────────────────────────────────────────────────
+const info = await getPayRequest(config, 'MW78SGTW');
+console.log(`$${Number(info.amount) / 1e6} USDC → ${info.to}`);
+
+// ── Buyer: pay with EIP-3009 signer (has wallet) ─────────────────────────
+const signer = createPrivateKeySigner(process.env.BUYER_PRIVATE_KEY!);
+const paid = await payPayRequest(config, 'MW78SGTW', signer);
+console.log('Explorer:', paid.explorerUrl);
+
+// ── Buyer: pay using a pre-generated payment code (no wallet at payment time)
+const result = await payPayRequestWithCode(config, 'MW78SGTW', 'MYBLIK78');
+console.log('Success:', result.success);
+console.log('Explorer:', result.explorerUrl);
+
+// If the code covers more than the invoice → change is returned as a new code
+if (result.changeCode) {
+  console.log(`Change $${Number(result.change) / 1e6} USDC → code: ${result.changeCode}`);
+}
+```
+
+### `payPayRequestWithCode` options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `returnChange` | `'code' \| 'wallet'` | `'code'` | How to return surplus when code value > invoice |
+| `allowOverpayment` | `boolean` | `true` | If `false`, throws when code value ≠ invoice amount |
+
+**`returnChange` behaviour:**
+
+| Value | Mechanism | Requires buyer wallet? |
+|-------|-----------|----------------------|
+| `'code'` (default) | Relayer pays merchant, generates a new code for the remainder | No |
+| `'wallet'` | `PaymentSettler.settleExact()` — merchant + change in one atomic tx | Yes (`from` address) |
+
+---
+
 ## Development
 
 ```bash

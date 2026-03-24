@@ -47,12 +47,37 @@ export type {
 export type { RelayFeedbackConfig } from './relay-feedback';
 export { submitRelayFeedback } from './relay-feedback';
 
+// Payment Requests — Merchant-initiated payment requests (reverse of payment-codes)
+export { createPayRequest, getPayRequest, payPayRequest, payPayRequestWithCode } from './payment-requests';
+export type {
+  PaymentRequestConfig,
+  CreatePayRequestParams,
+  PayRequest,
+  PayRequestInfo,
+  PayRequestResult,
+  PayPayRequestWithCodeOptions,
+} from './payment-requests';
+
 // Payment Codes — BLIK-style x402 payment codes (SKALE L3 + Base L2)
-export { generatePaymentCode, redeemPaymentCode, getPaymentCode } from './payment-codes';
+export {
+  createPrivateKeySigner,
+  generatePaymentCode,
+  generatePaymentCodesBatch,
+  redeemPaymentCode,
+  getPaymentCode,
+  cancelPaymentCode,
+  NETWORK_CONFIGS,
+} from './payment-codes';
 export type {
   PaymentCodeConfig,
+  PaymentCodeSigner,
+  PaymentCodeNetwork,
+  NetworkConfig,
   GeneratePaymentCodeParams,
+  GeneratePaymentCodesBatchParams,
+  BatchCodeItem,
   PaymentCode,
+  BatchPaymentCodesResult,
   RedeemResult,
   CodeStatus,
 } from './payment-codes';
