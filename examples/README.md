@@ -43,20 +43,29 @@ npx tsx examples/plugins/test/all.ts
 | **Solana** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 - **Plugins** (freeTier, shield, circuitBreaker, refund) are chain-agnostic — tested on Base over HTTP + WS, applies identically to all chains.
-- **Bridge** routes cross-chain in both directions:
-  - Solana wallet → Base endpoint (HTTP + WS)
-  - Solana wallet → SKALE endpoint (HTTP + WS)
-  - EVM wallet → Solana endpoint (HTTP + WS)
+- **Bridge** routes cross-chain — see `examples/bridge/` for all scenarios.
 - **x402 Tempo** is not available (Tempo is not in the facilitator's network list).
-- **Bridge Tempo** is not applicable (Tempo is not in the bridge's supported chain list).
-
-**46 ✅ — 112 unit tests + 16 functional + 29 plugin tests = 157 total**
 
 ## Directory structure
 
 ```
 examples/
-├── server/                        # Standalone servers
+├── bridge/                        # Cross-chain bridge examples
+│   ├── client-side/               # Server knows NOTHING about bridge — client bridges transparently
+│   │   ├── mpp-server-skale.ts        Standard evm/charge SKALE server
+│   │   ├── mpp-server-base.ts         Standard evm/charge Base server
+│   │   ├── x402-server-base.ts        Standard x402 Base server
+│   │   ├── mpp-client-tempo-to-skale.ts   Tempo → SKALE (evmChargeWithBridge)
+│   │   ├── mpp-client-tempo-to-base.ts    Tempo → Base  (evmChargeWithBridge)
+│   │   └── x402-client-solana-to-base.ts  Solana → Base (bridge: { enabled: true })
+│   │
+│   └── server-side/               # Server exposes bridge/charge — client uses that method
+│       ├── mpp-server-skale.ts        evm/charge + bridge/charge (SKALE)
+│       ├── mpp-server-solana.ts       solana/charge + bridge/charge (Solana)
+│       ├── mpp-client-tempo-to-skale.ts   Tempo → SKALE (bridgeCharge client)
+│       └── mpp-client-tempo-to-solana.ts  Tempo → Solana (bridgeCharge client)
+│
+├── server/                        # Standalone servers (direct payments, no bridge)
 │   ├── http/
 │   │   ├── tempo/mpp.ts           # MPP Tempo server ($0.01)
 │   │   ├── evm/
@@ -66,7 +75,7 @@ examples/
 │   └── ws/
 │       └── relay.ts               # WS + HTTP relay (Tempo MPP + x402 Base)
 │
-├── client/                        # Standalone clients
+├── client/                        # Standalone clients (direct payments, no bridge)
 │   ├── http/                      # HTTP transport
 │   │   ├── tempo/mpp.ts
 │   │   ├── evm/
@@ -110,6 +119,46 @@ examples/
 ```
 
 ## Running individual examples
+
+### Bridge (cross-chain)
+
+Two approaches to cross-chain payments:
+
+**Client-side bridge** — the server is standard (no bridge config). The client detects it's on a different chain and bridges transparently. Use this when the target chain is EVM.
+
+```bash
+# Terminal 1: standard SKALE server (no bridge awareness)
+npx tsx examples/bridge/client-side/mpp-server-skale.ts
+
+# Terminal 2: Tempo client bridges transparently
+EVM_PRIVATE_KEY=0x... npx tsx examples/bridge/client-side/mpp-client-tempo-to-skale.ts
+```
+
+```bash
+# Terminal 1: standard x402 Base server
+npx tsx examples/bridge/client-side/x402-server-base.ts
+
+# Terminal 2: Solana client auto-bridges
+SOLANA_PRIVATE_KEY=... npx tsx examples/bridge/client-side/x402-client-solana-to-base.ts
+```
+
+**Server-side bridge** — the server explicitly exposes `bridge/charge` alongside its direct method. The client picks bridge/charge when it can't pay directly. Use this when the target chain is Solana (not EVM).
+
+```bash
+# Terminal 1: SKALE server with evm/charge + bridge/charge
+npx tsx examples/bridge/server-side/mpp-server-skale.ts
+
+# Terminal 2: Tempo client uses bridge/charge
+EVM_PRIVATE_KEY=0x... npx tsx examples/bridge/server-side/mpp-client-tempo-to-skale.ts
+```
+
+```bash
+# Terminal 1: Solana server with solana/charge + bridge/charge
+npx tsx examples/bridge/server-side/mpp-server-solana.ts
+
+# Terminal 2: Tempo client bridges to Solana
+EVM_PRIVATE_KEY=0x... npx tsx examples/bridge/server-side/mpp-client-tempo-to-solana.ts
+```
 
 ### Server + client pairs (HTTP)
 
@@ -190,7 +239,6 @@ npx tsx examples/plugins/client/ws/x402/base.ts
 | **shield** | Health check — returns 503 when service is unhealthy |
 | **circuitBreaker** | Opens circuit after N settlement failures, auto-resets |
 | **refund** | Grants free credit on next call after settlement failure |
-| **bridge** | Cross-chain payments (e.g. Solana wallet → Base endpoint) |
 
 ## Notes
 

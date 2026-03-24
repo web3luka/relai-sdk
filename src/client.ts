@@ -23,6 +23,12 @@ import {
   normalizeNetwork,
   type RelaiNetwork,
 } from './types';
+import {
+  getBridgeInfo as _getBridgeInfo,
+  selectSourceChain as _selectSourceChain,
+  computeSourceAmount as _computeSourceAmount,
+  settleBridge as _settleBridge,
+} from './bridge';
 
 // ============================================================================
 // Types
@@ -92,6 +98,18 @@ export interface X402ClientConfig {
    * Pass an mppx client instance (from `Mppx.create()`).
    */
   mpp?: MppHandler;
+  /**
+   * Enable transparent cross-chain bridge.
+   * When set, the client auto-discovers bridge info from the RelAI API and
+   * bridges payments when no wallet matches the server's accepted chains.
+   * The server does NOT need to advertise bridge support — it just verifies
+   * a normal on-chain payment on its target chain.
+   */
+  bridge?: {
+    enabled?: boolean;
+    /** RelAI API base URL for auto-discovery (default: https://api.relai.fi) */
+    baseUrl?: string;
+  };
 }
 
 export type X402IntegritasFlow = 'single' | 'dual';
@@ -225,6 +243,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
     verbose = false,
     defaultHeaders = {},
     mpp,
+    bridge: bridgeConfig,
   } = config;
 
   const relayWsEnabled = relayWs?.enabled === true;
@@ -1694,7 +1713,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
     const selected = selectAccept(accepts);
     if (!selected) {
-      // Fallback: check bridge extension for cross-chain routing
+      // Fallback 1: check bridge extension in 402 response (server-advertised)
       const bridge = getBridgeExtension(requirements);
       if (bridge && selectBridgeSource(bridge)) {
         log('No direct wallet match — attempting bridge extension flow');
@@ -1705,6 +1724,86 @@ export function createX402Client(config: X402ClientConfig): X402Client {
           headers: { ...requestHeaders, 'X-PAYMENT': paymentHeader },
         });
       }
+
+      // Fallback 2: auto-bridge via RelAI API (server doesn't need to advertise bridge)
+      if (bridgeConfig?.enabled) {
+        log('No direct wallet match — attempting auto-bridge via RelAI API');
+        try {
+          const info = await _getBridgeInfo(bridgeConfig.baseUrl);
+          const targetAccept = accepts[0];
+          const hasEvm = !!effectiveWallets.evm;
+          const hasSol = !!hasSolanaWallet;
+          const source = _selectSourceChain(info.supportedSourceChains, hasEvm, hasSol);
+          if (source) {
+            const bridgePayTo = info.payTo[source.chain];
+            if (bridgePayTo) {
+              const targetAmount = targetAccept.amount || targetAccept.maxAmountRequired;
+              const sourceAmount = _computeSourceAmount(BigInt(targetAmount), info.feeBps).toString();
+              // Match asset by index (chains & assets arrays are aligned)
+              const sourceChainIdx = info.supportedSourceChains.indexOf(source.chain);
+              const sourceAsset = (sourceChainIdx >= 0 && info.supportedSourceAssets[sourceChainIdx])
+                || (source.type === 'evm'
+                  ? (info.supportedSourceAssets.find((a: string) => a.startsWith('0x')) || targetAccept.asset)
+                  : (info.supportedSourceAssets.find((a: string) => !a.startsWith('0x')) || ''));
+
+              // Build source payment using existing payment builders
+              let sourcePaymentHeader: string;
+              const sourceAccept = {
+                scheme: 'exact',
+                network: source.chain,
+                asset: sourceAsset,
+                payTo: bridgePayTo,
+                amount: sourceAmount,
+                extra: {
+                  ...(targetAccept.extra || {}),
+                  ...(source.type === 'solana' && info.feePayerSvm ? { feePayer: info.feePayerSvm } : {}),
+                },
+              };
+
+              if (source.type === 'solana' && hasSolanaWallet) {
+                sourcePaymentHeader = await buildSolanaPayment(sourceAccept, requirements, url);
+              } else if (source.type === 'evm') {
+                const evmNetwork = normalizeNetwork(source.chain);
+                const usePermit = evmNetwork && PERMIT_NETWORKS.has(evmNetwork);
+                sourcePaymentHeader = usePermit
+                  ? await buildEvmPermitPayment(sourceAccept, requirements, url)
+                  : await buildEvmPayment(sourceAccept, requirements, url);
+              } else {
+                throw new Error(`[relai-x402] No wallet for source chain type: ${source.type}`);
+              }
+
+              // Settle via bridge
+              const settleData = await _settleBridge(info.settleEndpoint, {
+                sourcePayment: sourcePaymentHeader,
+                sourceChain: source.chain,
+                targetAccept: {
+                  scheme: 'exact',
+                  network: targetAccept.network,
+                  asset: targetAccept.asset,
+                  payTo: targetAccept.payTo,
+                  amount: targetAmount,
+                },
+                requirements,
+                resource: url,
+                paymentFacilitator: info.paymentFacilitator,
+              });
+
+              if (settleData.xPayment) {
+                log(`Auto-bridge settled: target=${settleData.targetTxId}`);
+                return fetch(input, {
+                  ...requestInitWithHeaders,
+                  headers: { ...requestHeaders, 'X-PAYMENT': settleData.xPayment },
+                });
+              }
+
+              throw new Error('[relai-x402] Bridge settle did not return xPayment');
+            }
+          }
+        } catch (bridgeErr) {
+          log(`Auto-bridge failed: ${bridgeErr instanceof Error ? bridgeErr.message : bridgeErr}`);
+        }
+      }
+
       throw new Error(buildNoWalletError(accepts, false));
     }
 

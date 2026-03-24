@@ -625,7 +625,6 @@ export class Relai {
         // MPP: check for Authorization: Payment credential
         // -----------------------------------------------------------
         const authHeader = req.headers['authorization'] || '';
-        console.log(`[Relai] MPP check: paymentHeader=${!!paymentHeader}, hasMpp=${!!self.mpp}, authHeader=${authHeader?.slice(0, 30)}`);
         if (!paymentHeader && self.mpp && /^Payment\s+/i.test(authHeader)) {
           try {
             // Use the same amount format as the challenge (USD with 6 decimals)
@@ -643,10 +642,8 @@ export class Relai {
             // and verifies it against the HMAC-signed challenge
             const chargeHandler = self.mpp.charge({ amount: mppAmount } as any);
             const mppResult = await chargeHandler(mppRequest);
-            console.log(`[Relai] MPP charge result: status=${mppResult.status}, keys=${Object.keys(mppResult)}, hasChallenge=${!!mppResult.challenge}, hasWithReceipt=${!!mppResult.withReceipt}`);
             if (mppResult.status === 402 && mppResult.challenge instanceof Response) {
-              const retryAuth = mppResult.challenge.headers.get('www-authenticate');
-              console.log(`[Relai] MPP re-challenged (credential not accepted). New WWW-Auth: ${retryAuth?.slice(0, 60)}`);
+              // Credential not accepted — mppx re-challenges (normal handshake)
             }
 
             // MPP charge genuinely failed (not a 402 re-challenge, which is normal handshake)
@@ -696,7 +693,10 @@ export class Relai {
                 const dummyResponse = new Response(null);
                 const receiptResponse = mppResult.withReceipt(dummyResponse);
                 const receiptHeader = receiptResponse.headers.get('payment-receipt');
-                if (receiptHeader) res.setHeader('Payment-Receipt', receiptHeader);
+                if (receiptHeader) {
+                  res.setHeader?.('Payment-Receipt', receiptHeader);
+                  res.setHeader?.('Cache-Control', 'private');
+                }
               }
 
               options.onPaymentSettled?.(req, {
@@ -948,7 +948,7 @@ export class Relai {
               if (mppResult?.challenge instanceof Response) {
                 const wwwAuth = mppResult.challenge.headers.get('www-authenticate');
                 if (wwwAuth) {
-                  res.setHeader('WWW-Authenticate', wwwAuth);
+                  res.setHeader?.('WWW-Authenticate', wwwAuth);
                 }
               }
             } catch {
@@ -956,6 +956,7 @@ export class Relai {
             }
           }
 
+          res.setHeader?.('Cache-Control', 'no-store');
           return res.status(402).json(paymentRequiredResponse);
         }
 
@@ -980,48 +981,10 @@ export class Relai {
         }
 
         // -----------------------------------------------------------
-        // Bridged payment: trust the bridge proof (already settled)
-        // -----------------------------------------------------------
-        if (paymentProof.bridged === true && paymentProof.targetTxId) {
-          console.log(`[Relai] Bridged payment accepted: source=${paymentProof.sourceTxId}, target=${paymentProof.targetTxId}`);
-
-          const paymentInfo: PaymentInfo = {
-            verified: true,
-            transactionId: paymentProof.targetTxId,
-            payer: paymentProof.sourceTxId || 'bridge',
-            network,
-            amount: resolvedPrice,
-          };
-          req.payment = paymentInfo;
-          req.x402Payer = paymentProof.sourceTxId || 'bridge';
-          req.x402Paid = true;
-          req.x402Transaction = paymentProof.targetTxId;
-          req.x402Network = network;
-          req.x402Bridged = true;
-          req.x402SourceChain = paymentProof.sourceChain;
-
-          const paymentResponse = {
-            x402Version: 2,
-            scheme: 'exact',
-            network: caip2,
-            transaction: paymentProof.targetTxId,
-            payer: paymentProof.sourceTxId,
-            amount,
-            asset,
-            bridged: true,
-          };
-          res.setHeader(
-            'PAYMENT-RESPONSE',
-            Buffer.from(JSON.stringify(paymentResponse)).toString('base64'),
-          );
-
-          options.onPaymentSettled?.(req, { success: true, transaction: paymentProof.targetTxId, payer: paymentProof.sourceTxId } as SettleResult);
-
-          return next();
-        }
-
-        // -----------------------------------------------------------
         // Standard payment: settle via facilitator
+        // (Bridged payments go through the same facilitator /settle path.
+        //  The bridge settle returns a valid xPayment that the facilitator
+        //  can verify — no special-casing needed server-side.)
         // -----------------------------------------------------------
 
         // Resolve payTo for settle (extract from signed proof when using Stripe)
