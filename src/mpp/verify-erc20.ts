@@ -29,9 +29,12 @@ export interface VerifyErc20TransferOptions {
 export async function verifyErc20Transfer(opts: VerifyErc20TransferOptions): Promise<void> {
   const { txHash, rpcUrl, tokenAddress, recipient, expectedAmount } = opts
 
-  // Poll for receipt — the transaction may take a few seconds to be indexed by the RPC node
+  // Poll for receipt — the client sends the txHash right after broadcast,
+  // so the receipt may not be available yet.
+  // First check is immediate, then poll at 200ms intervals (aligned with Flashblocks cadence).
   let receipt: any = null
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 200))
     const receiptRes = await fetch(rpcUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -49,8 +52,6 @@ export async function verifyErc20Transfer(opts: VerifyErc20TransferOptions): Pro
 
     receipt = receiptData.result
     if (receipt) break
-    // Wait before retrying (1s, 2s, 3s, 4s)
-    await new Promise((r) => setTimeout(r, (attempt + 1) * 1000))
   }
 
   if (!receipt) {

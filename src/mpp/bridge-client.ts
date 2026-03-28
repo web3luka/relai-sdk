@@ -173,7 +173,8 @@ export function bridgeCharge(config: BridgeChargeClientConfig) {
       } else {
         // Solana: sign with ed25519 keypair, encode as base58
         const { Keypair } = await import('@solana/web3.js')
-        const nacl = await import('tweetnacl')
+        const naclModule = await import('tweetnacl')
+        const nacl = (naclModule as any).default ?? naclModule
         const kp = Keypair.fromSecretKey(solanaKeypair!.secretKey)
         senderAddress = kp.publicKey.toBase58()
         const messageBytes = new TextEncoder().encode(settleMessage)
@@ -425,10 +426,9 @@ export function bridgeCharge(config: BridgeChargeClientConfig) {
       programId,
     )
 
-    // Use feePayer if available, otherwise user pays gas
-    const payerPubkey = opts.feePayerSvm
-      ? new PublicKey(opts.feePayerSvm)
-      : userPubkey
+    // MPP mode: client broadcasts directly, so user must be fee payer
+    // (feePayerSvm is only for x402 flow where bridge co-signs before broadcast)
+    const payerPubkey = userPubkey
 
     const { blockhash } = await connection.getLatestBlockhash('confirmed')
     const message = new TransactionMessage({

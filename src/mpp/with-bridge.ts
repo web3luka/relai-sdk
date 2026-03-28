@@ -111,16 +111,29 @@ export function evmChargeWithBridge(config: EvmChargeWithBridgeConfig) {
         }
       }
 
-      const { amount, currency: tokenAddress, recipient, methodDetails } = request
+      const { amount: rawAmount, currency: tokenAddress, recipient, methodDetails } = request
       const targetChainId = methodDetails.chainId
+      const decimals = methodDetails.decimals ?? 6
+
+      // Normalize amount: may be USD decimal ("0.050000") or already atomic ("50000")
+      let amount: string
+      try {
+        BigInt(rawAmount)
+        amount = rawAmount
+      } catch {
+        amount = String(Math.round(parseFloat(rawAmount) * 10 ** decimals))
+      }
+
+      // Override amount with normalized atomic value
+      const normalizedRequest = { ...request, amount }
 
       // ── Direct payment (same chain, EVM only) ─────────────────────
       if (evmAccount && sourceChainId && targetChainId === sourceChainId) {
-        return directPayment(challenge, request)
+        return directPayment(challenge, normalizedRequest)
       }
 
       // ── Bridge payment (cross-chain) ───────────────────────────────
-      return bridgedPayment(challenge, request)
+      return bridgedPayment(challenge, normalizedRequest)
     },
   })
 
@@ -299,7 +312,8 @@ export function evmChargeWithBridge(config: EvmChargeWithBridgeConfig) {
 
       // Solana ed25519 signature
       const { Keypair } = await import('@solana/web3.js')
-      const nacl = await import('tweetnacl')
+      const naclModule = await import('tweetnacl')
+      const nacl = (naclModule as any).default ?? naclModule
       const kp = Keypair.fromSecretKey(solanaKeypair.secretKey)
       senderAddress = kp.publicKey.toBase58()
       const settleMessage = sourceTxHash + JSON.stringify(settleTargetAccept)
@@ -364,6 +378,13 @@ export function evmChargeWithBridge(config: EvmChargeWithBridgeConfig) {
         transaction?: string
         txHash?: string
         success?: boolean
+        errorReason?: string
+        error?: string
+      }
+      if (facilitatorData.success === false) {
+        throw new Error(
+          `[relai:withBridge] Facilitator settle failed: ${facilitatorData.errorReason || facilitatorData.error || 'unknown'}`,
+        )
       }
       targetTxHash = facilitatorData.transaction || facilitatorData.txHash
     }
@@ -428,9 +449,9 @@ export function evmChargeWithBridge(config: EvmChargeWithBridgeConfig) {
       programId,
     )
 
-    const payerPubkey = opts.feePayerSvm
-      ? new PublicKey(opts.feePayerSvm)
-      : userPubkey
+    // MPP mode: client broadcasts directly, so user must be fee payer
+    // (feePayerSvm is only for x402 flow where bridge co-signs before broadcast)
+    const payerPubkey = userPubkey
 
     const { blockhash } = await connection.getLatestBlockhash('confirmed')
     const message = new TransactionMessage({
@@ -442,10 +463,18 @@ export function evmChargeWithBridge(config: EvmChargeWithBridgeConfig) {
     const transaction = new VersionedTransaction(message)
     transaction.sign([userKeypair])
 
-    const signature = await connection.sendTransaction(transaction, {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-    })
+    let signature: string
+    try {
+      signature = await connection.sendTransaction(transaction, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      })
+    } catch (sendErr: any) {
+      const logs = sendErr?.logs || sendErr?.transactionMessage?.logs || []
+      console.error(`[relai:withBridge] Solana sendTransaction failed:`, sendErr.message)
+      if (logs.length) console.error(`[relai:withBridge] Simulation logs:`, logs.join('\n'))
+      throw sendErr
+    }
 
     const confirmation = await connection.confirmTransaction(signature, 'confirmed')
     if (confirmation.value.err) {

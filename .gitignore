@@ -67,6 +67,9 @@ docker-compose.override.yml
 terraform.tfstate*
 secrets.*
 
+# === Benchmarks ===
+examples/benchmark/
+
 # === Temp / Divers ===
 tmp/
 temp/
