@@ -17,6 +17,7 @@ import { Mppx as MppxSolServer, solana as solanaServer } from "@solana/mpp/serve
 import { Mppx as MppxSolClient, solana as solanaClient } from "@solana/mpp/client";
 import { evmCharge as evmChargeServer } from "../../src/mpp/evm-server";
 import { evmCharge as evmChargeClient } from "../../src/mpp/evm-client";
+import { evmChargeWithBridge } from "../../src/mpp/with-bridge";
 import { createX402Client, type MppHandler } from "../../src/client";
 import { privateKeyToAccount } from "viem/accounts";
 import { createKeyPairSignerFromBytes } from "@solana/kit";
@@ -94,6 +95,7 @@ interface ServerConfig {
   mppOverride?: any; // pre-built mpp handler (for Solana wrapper)
   label: string;
   payTo?: string;
+  price?: number;
 }
 
 async function startServer(config: ServerConfig): Promise<http.Server> {
@@ -112,7 +114,7 @@ async function startServer(config: ServerConfig): Promise<http.Server> {
 
   const protectData = relai.protect({
     payTo: config.payTo || RECIPIENT_WALLET,
-    price: 0.01,
+    price: config.price || 0.01,
     description: "Test endpoint",
   });
 
@@ -219,6 +221,28 @@ function makeMppSolanaClient(): MppHandler {
   if (!solanaSigner) throw new Error("SOLANA_PRIVATE_KEY not set");
   return MppxSolClient.create({
     methods: [solanaClient.charge({ signer: solanaSigner })],
+    polyfill: false,
+  });
+}
+
+function makeMppBridgeFromBase(): MppHandler {
+  return MppxClient.create({
+    methods: [evmChargeWithBridge({ evmAccount, sourceChainId: 8453, sourceRpcUrl: "https://mainnet.base.org" })],
+    polyfill: false,
+  });
+}
+
+function makeMppBridgeFromSkale(): MppHandler {
+  return MppxClient.create({
+    methods: [evmChargeWithBridge({ evmAccount, sourceChainId: 1187947933, sourceRpcUrl: "https://skale-base.skalenodes.com/v1/base" })],
+    polyfill: false,
+  });
+}
+
+function makeMppBridgeFromSolana(): MppHandler {
+  if (!solanaKeypair) throw new Error("SOLANA_PRIVATE_KEY not set");
+  return MppxClient.create({
+    methods: [evmChargeWithBridge({ solanaKeypair, solanaRpcUrl: SOLANA_RPC })],
     polyfill: false,
   });
 }
@@ -350,13 +374,38 @@ async function main() {
     }),
   ]);
 
+  // Port 4415: Tempo + EVM charge MPP (bridge destination)
+  const mppxEvmTempo = Mppx.create({
+    secretKey: MPP_SECRET_KEY,
+    methods: [evmChargeServer({
+      recipient: RECIPIENT_WALLET, tokenAddress: TEMPO_USDC,
+      chainId: 4217, rpcUrl: "https://rpc.tempo.xyz", decimals: 6, network: "base",
+    })],
+  });
+  const tempoCache = new Map<string, ReturnType<typeof mppxEvmTempo.charge>>();
+  const wrapTempo = {
+    charge(params: Record<string, unknown>) {
+      const usdAmount = parseFloat(params.amount as string);
+      const baseUnits = Math.round(usdAmount * 10 ** 6).toString();
+      if (!tempoCache.has(baseUnits)) {
+        tempoCache.set(baseUnits, mppxEvmTempo.charge({ ...params, amount: baseUnits }));
+      }
+      return tempoCache.get(baseUnits)!;
+    },
+  };
+  servers.push(await startServer({
+    port: 4415, network: "base", label: "Tempo EVM (bridge dest)",
+    mppOverride: wrapTempo,
+    price: 0.05,
+  }));
+
   // Port 4414: Solana + MPP Solana
   if (solanaSigner) {
     const solMppx = MppxSolServer.create({
       secretKey: MPP_SECRET_KEY,
       methods: [solanaServer.charge({
         recipient: SOLANA_RECIPIENT,
-        splToken: SOLANA_USDC,
+        currency: SOLANA_USDC,
         decimals: 6,
         network: "mainnet-beta",
         ...(SOLANA_RPC ? { rpcUrl: SOLANA_RPC } : {}),
@@ -381,7 +430,7 @@ async function main() {
     }));
   }
 
-  console.log(`Servers ready on ports 4410-441${solanaSigner ? '4' : '3'}\n`);
+  console.log(`Servers ready on ports 4410-441${solanaSigner ? '5' : '5'}\n`);
 
   // Small delay between x402 tests to avoid nonce collisions
   const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -467,6 +516,34 @@ async function main() {
     record("MPP-Sol", "WS", "Solana", "SKIP", "no SOLANA_PRIVATE_KEY");
     record("x402", "HTTP", "Solana", "SKIP", "no SOLANA_PRIVATE_KEY");
     record("x402", "WS", "Solana", "SKIP", "no SOLANA_PRIVATE_KEY");
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // MPP Bridge (cross-chain)
+  // ════════════════════════════════════════════════════════════════════════
+  console.log("\n── MPP Bridge ─────────────────────────────────────────");
+
+  await testFetch("MPP-Bridge", "HTTP", "Base→Tempo",
+    makeX402HttpClient(makeMppBridgeFromBase()), "http://localhost:4415/api/data");
+
+  await testFetch("MPP-Bridge", "WS", "Base→Tempo",
+    makeX402WsClient(makeMppBridgeFromBase()), "http://localhost:4415/relay/test/api/data");
+
+  await testFetch("MPP-Bridge", "HTTP", "SKALE→Tempo",
+    makeX402HttpClient(makeMppBridgeFromSkale()), "http://localhost:4415/api/data");
+
+  await testFetch("MPP-Bridge", "WS", "SKALE→Tempo",
+    makeX402WsClient(makeMppBridgeFromSkale()), "http://localhost:4415/relay/test/api/data");
+
+  if (solanaKeypair) {
+    await testFetch("MPP-Bridge", "HTTP", "Solana→Tempo",
+      makeX402HttpClient(makeMppBridgeFromSolana()), "http://localhost:4415/api/data");
+
+    await testFetch("MPP-Bridge", "WS", "Solana→Tempo",
+      makeX402WsClient(makeMppBridgeFromSolana()), "http://localhost:4415/relay/test/api/data");
+  } else {
+    record("MPP-Bridge", "HTTP", "Solana→Tempo", "SKIP", "no SOLANA_PRIVATE_KEY");
+    record("MPP-Bridge", "WS", "Solana→Tempo", "SKIP", "no SOLANA_PRIVATE_KEY");
   }
 
   // ════════════════════════════════════════════════════════════════════════

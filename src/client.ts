@@ -109,6 +109,8 @@ export interface X402ClientConfig {
     enabled?: boolean;
     /** RelAI API base URL for auto-discovery (default: https://api.relai.fi) */
     baseUrl?: string;
+    /** Force bridge even when the client could pay directly on the target chain */
+    force?: boolean;
   };
 }
 
@@ -1519,38 +1521,29 @@ export function createX402Client(config: X402ClientConfig): X402Client {
           const mppChallenge = extractMppChallengeFromWsError(wsPreflightResponse.error);
           if (mppChallenge) {
             log('MPP challenge detected in WS 402 response');
-            try {
-              const syntheticResponse = buildSyntheticMppResponse(mppChallenge, wsPreflightResponse.error);
-              const credential = await mpp.createCredential(syntheticResponse);
-              if (credential) {
-                log('MPP credential created, retrying via WS with Authorization: Payment');
-                wsPaymentPhaseStarted = true;
-                const wsMppResponse = await relayCallOverWebSocket({
-                  relayUrl: url,
-                  requestMethod,
-                  requestHeaders: {
-                    ...requestHeaders,
-                    'Authorization': credential.startsWith('Payment ') ? credential : `Payment ${credential}`,
-                  },
-                  requestBody,
-                  timeoutMs: relayWsPaymentTimeoutMs,
-                });
-
-                if (!wsMppResponse.error) {
-                  return buildWsResponse(wsMppResponse);
-                }
-
-                if (Number(wsMppResponse.error.code) !== 402) {
-                  throw new Error(wsMppResponse.error.message || '[relai-x402] WebSocket MPP retry failed');
-                }
-
-                log('MPP retry via WS still returned 402, falling through to x402 WS flow');
-                wsPaymentPhaseStarted = false;
-              }
-            } catch (mppWsErr) {
-              if (wsPaymentPhaseStarted) throw mppWsErr;
-              log(`MPP over WS failed (${mppWsErr instanceof Error ? mppWsErr.message : mppWsErr}), falling through to x402 WS flow`);
+            const syntheticResponse = buildSyntheticMppResponse(mppChallenge, wsPreflightResponse.error);
+            const credential = await mpp.createCredential(syntheticResponse);
+            if (!credential) {
+              throw new Error('[relai-x402] MPP createCredential returned empty credential (WS)');
             }
+            log('MPP credential created, retrying via WS with Authorization: Payment');
+            wsPaymentPhaseStarted = true;
+            const wsMppResponse = await relayCallOverWebSocket({
+              relayUrl: url,
+              requestMethod,
+              requestHeaders: {
+                ...requestHeaders,
+                'Authorization': credential.startsWith('Payment ') ? credential : `Payment ${credential}`,
+              },
+              requestBody,
+              timeoutMs: relayWsPaymentTimeoutMs,
+            });
+
+            if (wsMppResponse.error) {
+              throw new Error(wsMppResponse.error.message || '[relai-x402] WebSocket MPP payment rejected by server');
+            }
+
+            return buildWsResponse(wsMppResponse);
           }
         }
         // ── End MPP over WS ───────────────────────────────────────────────
@@ -1662,25 +1655,19 @@ export function createX402Client(config: X402ClientConfig): X402Client {
       const wwwAuth = response.headers.get('www-authenticate');
       if (wwwAuth && /^Payment\s+/i.test(wwwAuth.trim())) {
         log('MPP challenge detected in WWW-Authenticate header');
-        try {
-          const credential = await mpp.createCredential(response);
-          if (credential) {
-            log('MPP credential created, retrying with Authorization: Payment');
-            const mppRetry = await fetch(input, {
-              ...requestInitWithHeaders,
-              headers: {
-                ...requestHeaders,
-                'Authorization': credential.startsWith('Payment ') ? credential : `Payment ${credential}`,
-              },
-            });
-            if (mppRetry.status !== 402) {
-              return mppRetry;
-            }
-            log('MPP retry still returned 402, falling through to x402');
-          }
-        } catch (mppErr) {
-          log(`MPP payment failed (${mppErr instanceof Error ? mppErr.message : mppErr}), falling through to x402`);
+        const credential = await mpp.createCredential(response);
+        if (!credential) {
+          throw new Error('[relai-x402] MPP createCredential returned empty credential');
         }
+        log('MPP credential created, retrying with Authorization: Payment');
+        const mppRetry = await fetch(input, {
+          ...requestInitWithHeaders,
+          headers: {
+            ...requestHeaders,
+            'Authorization': credential.startsWith('Payment ') ? credential : `Payment ${credential}`,
+          },
+        });
+        return mppRetry;
       }
     }
     // ── End MPP ─────────────────────────────────────────────────────────
@@ -1711,7 +1698,7 @@ export function createX402Client(config: X402ClientConfig): X402Client {
 
     if (!accepts.length) throw new Error('[relai-x402] No payment options in 402 response');
 
-    const selected = selectAccept(accepts);
+    const selected = bridgeConfig?.force ? null : selectAccept(accepts);
     if (!selected) {
       // Fallback 1: check bridge extension in 402 response (server-advertised)
       const bridge = getBridgeExtension(requirements);
@@ -1800,7 +1787,9 @@ export function createX402Client(config: X402ClientConfig): X402Client {
             }
           }
         } catch (bridgeErr) {
-          log(`Auto-bridge failed: ${bridgeErr instanceof Error ? bridgeErr.message : bridgeErr}`);
+          const bridgeMsg = bridgeErr instanceof Error ? bridgeErr.message : String(bridgeErr);
+          log(`Auto-bridge failed: ${bridgeMsg}`);
+          throw new Error(`[relai-x402] Auto-bridge failed: ${bridgeMsg}`);
         }
       }
 

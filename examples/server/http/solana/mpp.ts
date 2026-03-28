@@ -55,7 +55,7 @@ const mppx = Mppx.create({
   methods: [
     solana.charge({
       recipient: RECIPIENT_WALLET,
-      splToken: SOLANA_USDC,
+      currency: SOLANA_USDC,
       decimals: DECIMALS,
       network: SOLANA_NETWORK,
       ...(SOLANA_RPC_URL ? { rpcUrl: SOLANA_RPC_URL } : {}),

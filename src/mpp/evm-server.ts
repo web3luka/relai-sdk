@@ -86,12 +86,20 @@ export function evmCharge(config: EvmChargeConfig) {
         throw new Error('Missing or invalid transaction hash in credential payload')
       }
 
+      // Amount may be in USD decimal ("0.050000") or already atomic ("50000")
+      let expectedAmount: bigint
+      try {
+        expectedAmount = BigInt(cred.challenge.request.amount)
+      } catch {
+        expectedAmount = BigInt(Math.round(parseFloat(cred.challenge.request.amount) * 10 ** decimals))
+      }
+
       await verifyErc20Transfer({
         txHash,
         rpcUrl,
         tokenAddress,
         recipient,
-        expectedAmount: BigInt(cred.challenge.request.amount),
+        expectedAmount,
       })
       return Receipt.from({
         method: 'evm',
