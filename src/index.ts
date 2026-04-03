@@ -47,15 +47,35 @@ export type {
 export type { RelayFeedbackConfig } from './relay-feedback';
 export { submitRelayFeedback } from './relay-feedback';
 
+// Solana Payment Codes — BLIK-style pre-funded codes on Solana (SPL custodial escrow)
+export {
+  generateSolanaPaymentCode,
+  getSolanaPaymentCode,
+  redeemSolanaPaymentCode,
+  cancelSolanaPaymentCode,
+} from './solana-payment-codes';
+export type {
+  SolanaCodeConfig,
+  GenerateSolanaPaymentCodeParams,
+  SolanaPaymentCode,
+  SolanaCodeStatus,
+  SolanaCodeRedeemResult,
+  SolanaCodeCancelResult,
+} from './solana-payment-codes';
+
 // Payment Requests — Merchant-initiated payment requests (reverse of payment-codes)
-export { createPayRequest, getPayRequest, payPayRequest, payPayRequestWithCode } from './payment-requests';
+export { createPayRequest, getPayRequest, payPayRequest, payPayRequestWithCode, payPayRequestWithSolana } from './payment-requests';
 export type {
   PaymentRequestConfig,
   CreatePayRequestParams,
+  PaymentRequestNetwork,
   PayRequest,
   PayRequestInfo,
   PayRequestResult,
   PayPayRequestWithCodeOptions,
+  SolanaWalletAdapter,
+  SolanaPayRequestOptions,
+  SolanaPayRequestResult,
 } from './payment-requests';
 
 // Payment Codes — BLIK-style x402 payment codes (SKALE L3 + Base L2)

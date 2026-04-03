@@ -16,18 +16,31 @@ import { NETWORK_CONFIGS, redeemPaymentCode, getPaymentCode, type PaymentCodeNet
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Networks supported for payment requests.
+ * Extends EVM payment code networks with Solana mainnet/devnet.
+ */
+export type PaymentRequestNetwork =
+  | PaymentCodeNetwork
+  | "solana"
+  | "solana-devnet";
+
 export interface PaymentRequestConfig {
   /** RelAI facilitator base URL (default: https://relai.fi/facilitator) */
   facilitatorUrl?: string;
 }
 
 export interface CreatePayRequestParams {
-  /** Merchant wallet address — receives the USDC */
+  /** Merchant wallet address — EVM (0x...) for EVM networks, base58 for Solana */
   to: string;
   /** Amount in USDC micro-units (6 decimals), e.g. 1_000_000 = $1.00 */
   amount: number | bigint;
-  /** Settlement network (default: "base-sepolia") */
-  network?: PaymentCodeNetwork;
+  /**
+   * Settlement network — where the merchant receives USDC.
+   * Default: "base-sepolia".
+   * Solana options: "solana-devnet" | "solana"
+   */
+  network?: PaymentRequestNetwork;
   /** Payment description shown to the buyer, e.g. "Coffee ☕" */
   description?: string;
   /** Code TTL in seconds (min 60, max 86400, default 3600) */
@@ -270,6 +283,40 @@ export async function payPayRequest(
  * console.log('Paid! Explorer:', result.explorerUrl);
  * ```
  */
+// ── Solana cross-chain types ─────────────────────────────────────────────────
+
+export interface SolanaWalletAdapter {
+  /** Solana wallet public key */
+  publicKey: { toString(): string } | null;
+  /** Signs a Solana transaction (buyer's signature) */
+  signTransaction<T>(transaction: T): Promise<T>;
+}
+
+export interface SolanaPayRequestOptions {
+  /** Override Solana network (default: auto-detected from relayer-info) */
+  solanaNetwork?: 'solana' | 'solana-devnet';
+  /** Solana RPC URL (default: public mainnet/devnet) */
+  solanaRpcUrl?: string;
+}
+
+export interface SolanaPayRequestResult {
+  success: boolean;
+  code: string;
+  /** EVM tx hash — merchant received USDC on Base/SKALE */
+  payTxHash: string;
+  /** EVM explorer link */
+  explorerUrl: string;
+  /** Solana tx hash — buyer paid USDC from their Solana wallet */
+  solanaTxHash: string;
+  /** Solana explorer link */
+  solanaExplorerUrl: string;
+  amount: string;
+  /** Merchant EVM address */
+  to: string;
+  /** Merchant settlement network */
+  network: string;
+}
+
 export interface PayPayRequestWithCodeOptions {
   /**
    * How to return the change when the payment code value exceeds the invoice amount.
@@ -364,4 +411,136 @@ export async function payPayRequestWithCode(
   }
 
   return res.json() as Promise<RedeemResult>;
+}
+
+/**
+ * Pay a merchant's payment request using a Solana wallet.
+ * Cross-chain flow: buyer pays USDC on Solana, merchant receives USDC on Base/SKALE.
+ * No EVM wallet required for the buyer — only a Solana wallet adapter.
+ *
+ * The relayer sponsors Solana gas and bridges the payment to the merchant's EVM network.
+ *
+ * @example Agent/buyer pays with Solana wallet:
+ * ```ts
+ * // wallet = any Solana wallet adapter (Phantom, Backpack, private key, etc.)
+ * const result = await payPayRequestWithSolana(config, 'MW78SGTW', wallet);
+ * console.log('Solana tx:', result.solanaExplorerUrl);
+ * console.log('Merchant received on Base:', result.explorerUrl);
+ * ```
+ */
+export async function payPayRequestWithSolana(
+  config: PaymentRequestConfig,
+  requestCode: string,
+  wallet: SolanaWalletAdapter,
+  options: SolanaPayRequestOptions = {},
+): Promise<SolanaPayRequestResult> {
+  const facilitatorUrl = config.facilitatorUrl ?? DEFAULT_FACILITATOR;
+  const { solanaRpcUrl } = options;
+
+  // 1. Fetch payment request
+  const info = await getPayRequest(config, requestCode);
+  if (!info.payable) {
+    throw new Error(
+      info.status === "paid"
+        ? "Payment request already paid"
+        : "Payment request expired or not payable",
+    );
+  }
+
+  if (!wallet.publicKey) throw new Error("Solana wallet not connected");
+
+  // 2. Get relayer's Solana address + USDC mint from relayer-info
+  const infoRes = await fetch(`${facilitatorUrl}/payment-requests/relayer-info`);
+  if (!infoRes.ok) throw new Error("Failed to fetch relayer info");
+  const relayerInfo = await infoRes.json() as any;
+
+  if (!relayerInfo.solana?.address) {
+    throw new Error("Facilitator Solana wallet not configured — cross-chain payments unavailable");
+  }
+
+  const solanaNetwork = options.solanaNetwork ?? relayerInfo.solana.network ?? "solana";
+  const relayerSolanaAddr: string = relayerInfo.solana.address;
+  const usdcMint: string =
+    relayerInfo.solana?.usdc?.[solanaNetwork] ??
+    (solanaNetwork === "solana-devnet"
+      ? "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+      : "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+
+  // Detect flow: Solana→Solana (merchant on Solana, direct SPL to merchant)
+  //              Solana→EVM   (merchant on Base/SKALE, cross-chain via relayer)
+  const merchantOnSolana = info.network === "solana" || info.network === "solana-devnet";
+
+  // 3. Build SPL transferChecked tx: buyer ATA → dest ATA (merchant or relayer)
+  const { Connection, PublicKey, TransactionMessage, VersionedTransaction } =
+    await import("@solana/web3.js");
+  const {
+    getAssociatedTokenAddress,
+    createTransferCheckedInstruction,
+    getMint,
+    TOKEN_PROGRAM_ID,
+    TOKEN_2022_PROGRAM_ID,
+  } = await import("@solana/spl-token");
+
+  const rpcUrl =
+    solanaRpcUrl ??
+    (solanaNetwork === "solana-devnet"
+      ? "https://api.devnet.solana.com"
+      : "https://api.mainnet-beta.solana.com");
+  const connection = new Connection(rpcUrl, "confirmed");
+
+  const mintPubkey = new PublicKey(usdcMint);
+  const buyerPK    = new PublicKey(wallet.publicKey.toString());
+  const relayerPK  = new PublicKey(relayerSolanaAddr);
+  // For Solana→Solana: send directly to merchant's ATA (info.toAddress IS the merchant)
+  // For Solana→EVM:    send to relayer's ATA (relayer bridges to EVM merchant)
+  const destOwnerPK = merchantOnSolana
+    ? new PublicKey(info.toAddress)   // merchant's Solana address
+    : relayerPK;                       // relayer's Solana address
+
+  // Detect token program (TOKEN vs TOKEN_2022)
+  let programId = TOKEN_PROGRAM_ID;
+  try {
+    await getMint(connection, mintPubkey, "confirmed", TOKEN_2022_PROGRAM_ID);
+    programId = TOKEN_2022_PROGRAM_ID;
+  } catch { /* use TOKEN_PROGRAM_ID */ }
+
+  const mintInfo   = await getMint(connection, mintPubkey, "confirmed", programId);
+  const sourceAta  = await getAssociatedTokenAddress(mintPubkey, buyerPK,      true, programId);
+  const destAta    = await getAssociatedTokenAddress(mintPubkey, destOwnerPK,  true, programId);
+  const amount     = BigInt(info.amount);
+
+  const transferIx = createTransferCheckedInstruction(
+    sourceAta, mintPubkey, destAta, buyerPK,
+    amount, mintInfo.decimals, [], programId,
+  );
+
+  const { blockhash } = await connection.getLatestBlockhash("confirmed");
+
+  // feePayer = relayer (backend will co-sign before broadcasting)
+  const message = new TransactionMessage({
+    payerKey:       relayerPK,
+    recentBlockhash: blockhash,
+    instructions:   [transferIx],
+  }).compileToV0Message();
+
+  const tx     = new VersionedTransaction(message);
+  const signed = await wallet.signTransaction(tx);
+  const serialized = Buffer.from((signed as any).serialize()).toString("base64");
+
+  // 4. POST to backend — relayer co-signs + broadcasts Solana tx, then pays merchant on EVM
+  const res = await fetch(
+    `${facilitatorUrl}/payment-requests/${requestCode.trim().toUpperCase()}/pay-solana`,
+    {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ transaction: serialized, network: solanaNetwork }),
+    },
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as any;
+    throw new Error(err.error ?? `Solana payment failed: ${res.status}`);
+  }
+
+  return res.json() as Promise<SolanaPayRequestResult>;
 }
