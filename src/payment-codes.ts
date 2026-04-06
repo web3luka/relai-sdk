@@ -141,7 +141,7 @@ export interface GeneratePaymentCodesBatchParams {
   /** Override the USDC contract address */
   usdcContract?: string;
   /** RelAI auth token (required — batch endpoint is authenticated) */
-  authToken: string;
+  authToken?: string;
 }
 
 export interface PaymentCode {
@@ -197,6 +197,7 @@ export interface CodeStatus {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 const DEFAULT_FACILITATOR = "https://relai.fi/facilitator";
+const AUTHORIZATION_WINDOW_SECONDS = 3600;
 
 function randomBytes32(): string {
   const bytes = new Uint8Array(32);
@@ -220,6 +221,18 @@ async function fetchToAddress(
   const data = await res.json() as { toAddress: string };
   if (!data.toAddress) throw new Error("Facilitator returned no toAddress");
   return data.toAddress;
+}
+
+async function fetchEscrowAddress(
+  facilitatorUrl: string,
+  network: PaymentCodeNetwork,
+): Promise<string> {
+  const res = await fetch(`${facilitatorUrl}/payment-codes/relayer-address`);
+  if (!res.ok) throw new Error("Failed to fetch escrow address from facilitator");
+  const data = await res.json() as { escrowAddresses?: Record<string, string | null | undefined> };
+  const escrowAddress = data.escrowAddresses?.[network];
+  if (!escrowAddress) throw new Error(`Facilitator returned no escrow address for ${network}`);
+  return escrowAddress;
 }
 
 async function signEip3009(
@@ -333,7 +346,7 @@ export async function generatePaymentCodesBatch(
 ): Promise<BatchPaymentCodesResult> {
   const {
     signer, codes, payee, usdcContract,
-    network = "base-sepolia", authToken,
+    network = "base-sepolia",
   } = params;
   const facilitatorUrl = config.facilitatorUrl ?? DEFAULT_FACILITATOR;
   const net = NETWORK_CONFIGS[network];
@@ -344,40 +357,82 @@ export async function generatePaymentCodesBatch(
   const usdc      = usdcContract ?? net.usdc;
   const now       = Math.floor(Date.now() / 1000);
   const toAddress = await fetchToAddress(facilitatorUrl, network);
+  const escrowAddress = await fetchEscrowAddress(facilitatorUrl, network);
+  const results: BatchPaymentCodesResult["codes"] = [];
+  const failed: BatchPaymentCodesResult["failed"] = [];
 
-  const signedCodes = await Promise.all(
-    codes.map(async (item) => {
+  for (let index = 0; index < codes.length; index += 1) {
+    const item = codes[index];
+
+    try {
       const validBefore = now + (item.ttl ?? 86400);
-      const nonce       = randomBytes32();
-      const value       = BigInt(item.value).toString();
-      const signature   = await signEip3009(
-        signer, net, from, toAddress, value, 0, validBefore, nonce, usdc,
+      const authorizationValidBefore = Math.min(validBefore, now + AUTHORIZATION_WINDOW_SECONDS);
+      const nonce = randomBytes32();
+      const value = BigInt(item.value).toString();
+      const authorization = {
+        from,
+        to: escrowAddress,
+        value,
+        validAfter: 0,
+        validBefore: authorizationValidBefore,
+        nonce,
+      };
+      const signature = await signEip3009(
+        signer,
+        net,
+        from,
+        escrowAddress,
+        value,
+        authorization.validAfter,
+        authorization.validBefore,
+        authorization.nonce,
+        usdc,
       );
-      return { value, validAfter: 0, validBefore, nonce, signature };
-    }),
-  );
 
-  const res = await fetch(`${facilitatorUrl}/payment-codes/batch`, {
-    method: "POST",
-    headers: {
-      "Content-Type":  "application/json",
-      "Authorization": `Bearer ${authToken}`,
-    },
-    body: JSON.stringify({
-      from,
-      settlementNetwork: net.settlementNetwork,
-      usdcContract:      usdc,
-      ...(payee ? { payee } : {}),
-      codes: signedCodes,
-    }),
-  });
+      const res = await fetch(`${facilitatorUrl}/payment-codes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from,
+          value,
+          validBefore,
+          usdcContract: usdc,
+          settlementNetwork: net.settlementNetwork,
+          escrowMode: true,
+          ...(payee ? { payee } : {}),
+          signature,
+          authorization,
+        }),
+      });
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({})) as any;
-    throw new Error(`Batch registration failed: ${err.error ?? res.status}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as any;
+        failed.push({ index, error: String(err.error ?? err.detail ?? res.status) });
+        continue;
+      }
+
+      const payload = await res.json() as Partial<PaymentCode> & { locked?: boolean; expiresIn?: number };
+      results.push({
+        code: String(payload.code ?? ""),
+        validBefore: Number(payload.validBefore ?? validBefore),
+        expiresIn: Number(payload.expiresIn ?? (validBefore - Math.floor(Date.now() / 1000))),
+        locked: Boolean(payload.locked ?? payee),
+      });
+    } catch (error) {
+      failed.push({
+        index,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
-  return res.json() as Promise<BatchPaymentCodesResult>;
+  return {
+    registered: results.length,
+    codes: results,
+    failed,
+    relayerAddress: toAddress,
+    settlementNetwork: net.settlementNetwork,
+  };
 }
 
 /**

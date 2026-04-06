@@ -30,6 +30,22 @@ export interface GenerateSolanaPaymentCodeParams {
   solanaRpcUrl?: string;
   /** Code TTL in seconds (min 60, max 604800 = 7 days, default 86400 = 24 h) */
   ttlSeconds?: number;
+  /** Create a private claim link instead of returning a visible code */
+  claimLink?: boolean;
+  /** Optional facilitator-side description associated with the code */
+  description?: string;
+}
+
+export interface GenerateSolanaPaymentCodeBatchItem {
+  amount: number | bigint;
+  ttlSeconds?: number;
+  description?: string;
+}
+
+export interface GenerateSolanaPaymentCodeBatchParams {
+  items: GenerateSolanaPaymentCodeBatchItem[];
+  network?: 'solana' | 'solana-devnet';
+  solanaRpcUrl?: string;
 }
 
 export interface SolanaPaymentCode {
@@ -43,6 +59,28 @@ export interface SolanaPaymentCode {
   network: string;
   /** Solscan explorer link for the funding transaction */
   explorerUrl: string;
+}
+
+export interface SolanaClaimLink {
+  [key: string]: unknown;
+  validUntil: number;
+  amount: string;
+  network: string;
+  explorerUrl: string;
+  claimLink: true;
+  claimToken?: string;
+  claimUrl?: string | null;
+  description?: string | null;
+}
+
+export interface SolanaPaymentCodeBatchResult {
+  registered: number;
+  fundingTxHash: string;
+  explorerUrl: string;
+  network: string;
+  totalAmount: string;
+  codes: SolanaPaymentCode[];
+  failed?: Array<{ index: number; error: string }>;
 }
 
 export interface SolanaCodeStatus {
@@ -89,19 +127,27 @@ export interface SolanaWalletAdapter {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /** Generate a random 8-char BLIK-style code (cross-env: Node + browser). */
-function generateCode(): string {
+function generateCode(network: 'solana' | 'solana-devnet', claimLink = false): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = new Uint8Array(8);
+  const randomLength = claimLink ? 6 : 7;
+  const bytes = new Uint8Array(randomLength);
   if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
     globalThis.crypto.getRandomValues(bytes);
   } else {
     // Node.js — dynamic import to avoid breaking browser bundles
     const { randomBytes } = require('crypto') as typeof import('crypto');
-    randomBytes(8).copy(Buffer.from(bytes.buffer));
+    randomBytes(randomLength).copy(Buffer.from(bytes.buffer));
   }
-  let code = '';
-  for (let i = 0; i < 8; i++) code += chars[bytes[i] % chars.length];
+  let code = network === 'solana-devnet' ? 'D' : 'S';
+  if (claimLink) code += 'Z';
+  for (let i = 0; i < bytes.length; i++) code += chars[bytes[i] % chars.length];
   return code;
+}
+
+function buildClaimUrl(facilitatorUrl: string, claimToken: string | null): string | null {
+  if (!claimToken) return null;
+  const origin = new URL(facilitatorUrl).origin;
+  return new URL(`/claim/${claimToken}`, origin).toString();
 }
 
 /** Compute Anchor instruction discriminator: sha256("global:<name>").slice(0, 8) */
@@ -116,6 +162,14 @@ async function anchorDisc(name: string): Promise<Uint8Array> {
   return new Uint8Array(createHash('sha256').update(preimage).digest()).slice(0, 8);
 }
 
+function writeBigInt64LE(target: Uint8Array, value: bigint, offset: number): void {
+  let remaining = BigInt.asUintN(64, value);
+  for (let index = 0; index < 8; index += 1) {
+    target[offset + index] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+}
+
 /** Build a create_vault or cancel_vault instruction data buffer. */
 async function buildInstructionData(
   name: 'create_vault' | 'cancel_vault',
@@ -128,8 +182,8 @@ async function buildInstructionData(
     const buf = Buffer.alloc(32);
     Buffer.from(disc).copy(buf, 0);
     Buffer.from(codeBytes).copy(buf, 8);
-    buf.writeBigUInt64LE(extra.amount, 16);
-    buf.writeBigInt64LE(extra.validUntil, 24);
+    writeBigInt64LE(buf, extra.amount, 16);
+    writeBigInt64LE(buf, extra.validUntil, 24);
     return buf;
   }
   // disc(8) + code_bytes(8) = 16
@@ -161,9 +215,9 @@ export async function generateSolanaPaymentCode(
   config: SolanaCodeConfig,
   wallet: SolanaWalletAdapter,
   params: GenerateSolanaPaymentCodeParams,
-): Promise<SolanaPaymentCode> {
+): Promise<SolanaPaymentCode | SolanaClaimLink> {
   const facilitatorUrl = config.facilitatorUrl ?? DEFAULT_FACILITATOR;
-  const { solanaRpcUrl, ttlSeconds = 86400 } = params;
+  const { solanaRpcUrl, ttlSeconds = 86400, claimLink = false } = params;
   const amount = BigInt(params.amount);
   if (amount <= 0n) throw new Error('amount must be positive');
   if (!wallet.publicKey) throw new Error('Solana wallet not connected');
@@ -184,7 +238,7 @@ export async function generateSolanaPaymentCode(
       : 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 
   // 2. Generate random code + derive vault PDA
-  const code      = generateCode();
+  const code      = generateCode(network, claimLink);
   const codeBytes = new TextEncoder().encode(code); // 8 ASCII bytes
 
   const {
@@ -222,6 +276,7 @@ export async function generateSolanaPaymentCode(
   const createVaultIx = new TransactionInstruction({
     programId: programPK,
     keys: [
+      { pubkey: relayerPK,                  isSigner: true,  isWritable: true  }, // caller / fee payer
       { pubkey: buyerPK,                    isSigner: true,  isWritable: true  }, // buyer
       { pubkey: vaultPda,                   isSigner: false, isWritable: true  }, // vault PDA (init)
       { pubkey: vaultAta,                   isSigner: false, isWritable: true  }, // vault ATA (init)
@@ -252,6 +307,8 @@ export async function generateSolanaPaymentCode(
     amount:      amount.toString(),
     network,
     ttlSeconds,
+    claimLink,
+    ...(params.description ? { description: params.description } : {}),
   };
 
   const res = await fetch(`${facilitatorUrl}/solana-payment-codes`, {
@@ -265,7 +322,158 @@ export async function generateSolanaPaymentCode(
     throw new Error(err.error ?? `generateSolanaPaymentCode failed: ${res.status}`);
   }
 
-  return res.json() as Promise<SolanaPaymentCode>;
+  const payload = await res.json() as Record<string, unknown>;
+  if (payload.claimLink === true) {
+    const claimToken = typeof payload.claimToken === 'string' ? payload.claimToken : null;
+    const sanitized = { ...payload };
+    delete sanitized.claimToken;
+    delete sanitized.id;
+    delete sanitized.code;
+    return {
+      ...sanitized,
+      claimLink: true,
+      claimUrl: buildClaimUrl(facilitatorUrl, claimToken),
+    } as SolanaClaimLink;
+  }
+  return payload as unknown as SolanaPaymentCode;
+}
+
+export async function generateSolanaPaymentCodesBatch(
+  config: SolanaCodeConfig,
+  wallet: SolanaWalletAdapter,
+  params: GenerateSolanaPaymentCodeBatchParams,
+): Promise<SolanaPaymentCodeBatchResult> {
+  const facilitatorUrl = config.facilitatorUrl ?? DEFAULT_FACILITATOR;
+  const items = Array.isArray(params.items) ? params.items : [];
+  if (items.length === 0) throw new Error('items must not be empty');
+  if (items.length > 10) throw new Error('Maximum 10 Solana batch items are supported per transaction');
+  if (!wallet.publicKey) throw new Error('Solana wallet not connected');
+
+  const infoRes = await fetch(`${facilitatorUrl}/solana-payment-codes/relayer-info`);
+  if (!infoRes.ok) throw new Error('Failed to fetch Solana relayer info');
+  const relayerInfo = await infoRes.json() as any;
+
+  const network: 'solana' | 'solana-devnet' =
+    params.network ?? relayerInfo.defaultNetwork ?? 'solana';
+  const relayerAddr: string = relayerInfo.address;
+  const programId: string = relayerInfo.programId;
+  const usdcMint: string =
+    relayerInfo.networks?.[network]?.usdc ??
+    (network === 'solana-devnet'
+      ? '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
+      : 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+
+  const {
+    Connection, PublicKey, TransactionMessage, VersionedTransaction, TransactionInstruction,
+  } = await import('@solana/web3.js');
+  const {
+    getAssociatedTokenAddressSync,
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+  } = await import('@solana/spl-token');
+
+  const rpcUrl = params.solanaRpcUrl ??
+    (network === 'solana-devnet' ? 'https://api.devnet.solana.com' : 'https://api.mainnet-beta.solana.com');
+  const connection = new Connection(rpcUrl, 'confirmed');
+
+  const programPK = new PublicKey(programId);
+  const mintPK = new PublicKey(usdcMint);
+  const buyerPK = new PublicKey(wallet.publicKey.toString());
+  const relayerPK = new PublicKey(relayerAddr);
+  const buyerAta = getAssociatedTokenAddressSync(mintPK, buyerPK, false, TOKEN_PROGRAM_ID);
+  const systemProgram = new PublicKey('11111111111111111111111111111111');
+
+  const usedCodes = new Set<string>();
+  const preparedItems: Array<{
+    code: string;
+    amount: bigint;
+    ttlSeconds: number;
+    description?: string;
+    validUntil: bigint;
+  }> = [];
+  const instructions = [];
+  let totalAmount = 0n;
+
+  for (const item of items) {
+    const amount = BigInt(item.amount);
+    if (amount <= 0n) throw new Error('Each batch item amount must be positive');
+    const ttlSeconds = Math.min(Math.max(Math.round(Number(item.ttlSeconds ?? 86400)), 60), 604800);
+    const validUntil = BigInt(Math.floor(Date.now() / 1000) + ttlSeconds);
+
+    let code = generateCode(network, false);
+    while (usedCodes.has(code)) code = generateCode(network, false);
+    usedCodes.add(code);
+
+    const codeBytes = new TextEncoder().encode(code);
+    const [vaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('vault'), Buffer.from(codeBytes)],
+      programPK,
+    );
+    const vaultAta = getAssociatedTokenAddressSync(mintPK, vaultPda, true, TOKEN_PROGRAM_ID);
+    const ixData = await buildInstructionData('create_vault', codeBytes, { amount, validUntil });
+
+    instructions.push(new TransactionInstruction({
+      programId: programPK,
+      keys: [
+        { pubkey: relayerPK, isSigner: true, isWritable: true },
+        { pubkey: buyerPK, isSigner: true, isWritable: true },
+        { pubkey: vaultPda, isSigner: false, isWritable: true },
+        { pubkey: vaultAta, isSigner: false, isWritable: true },
+        { pubkey: buyerAta, isSigner: false, isWritable: true },
+        { pubkey: mintPK, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: systemProgram, isSigner: false, isWritable: false },
+      ],
+      data: ixData,
+    }));
+
+    preparedItems.push({
+      code,
+      amount,
+      ttlSeconds,
+      description: item.description,
+      validUntil,
+    });
+    totalAmount += amount;
+  }
+
+  const { blockhash } = await connection.getLatestBlockhash('confirmed');
+  const message = new TransactionMessage({
+    payerKey: relayerPK,
+    recentBlockhash: blockhash,
+    instructions,
+  }).compileToV0Message();
+
+  const tx = new VersionedTransaction(message);
+  const signed = await wallet.signTransaction(tx);
+  const serialized = Buffer.from((signed as any).serialize()).toString('base64');
+
+  const res = await fetch(`${facilitatorUrl}/solana-payment-codes/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      transaction: serialized,
+      network,
+      items: preparedItems.map((item) => ({
+        code: item.code,
+        amount: item.amount.toString(),
+        ttlSeconds: item.ttlSeconds,
+        ...(item.description ? { description: item.description } : {}),
+      })),
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as any;
+    throw new Error(err.error ?? `generateSolanaPaymentCodesBatch failed: ${res.status}`);
+  }
+
+  const payload = await res.json() as SolanaPaymentCodeBatchResult;
+  return {
+    ...payload,
+    totalAmount: typeof payload.totalAmount === 'string' ? payload.totalAmount : totalAmount.toString(),
+  };
 }
 
 // ── getSolanaPaymentCode ───────────────────────────────────────────────────────
@@ -391,6 +599,7 @@ export async function cancelSolanaPaymentCode(
   const cancelIx = new TransactionInstruction({
     programId: programPK,
     keys: [
+      { pubkey: relayerPK,                   isSigner: true,  isWritable: true  }, // caller / fee payer
       { pubkey: buyerPK,                     isSigner: true,  isWritable: true  }, // buyer (must sign)
       { pubkey: vaultPda,                    isSigner: false, isWritable: true  }, // vault PDA
       { pubkey: vaultAta,                    isSigner: false, isWritable: true  }, // vault ATA

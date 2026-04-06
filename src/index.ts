@@ -57,6 +57,7 @@ export {
 export type {
   SolanaCodeConfig,
   GenerateSolanaPaymentCodeParams,
+  SolanaClaimLink,
   SolanaPaymentCode,
   SolanaCodeStatus,
   SolanaCodeRedeemResult,
@@ -101,6 +102,39 @@ export type {
   RedeemResult,
   CodeStatus,
 } from './payment-codes';
+
+export {
+  createPaymentCode,
+  createPaymentCodesBatch,
+  listOwnerPaymentCodes,
+  getPaymentCodeDetails,
+  redeemStoredPaymentCode,
+  cancelStoredPaymentCode,
+  claimPaymentLink,
+  payPayRequestWithStoredCode,
+} from './current-payment-codes';
+export type {
+  CurrentPaymentCodeNetwork,
+  EvmCurrentPaymentCodeSigner,
+  SolanaCurrentPaymentCodeWallet,
+  CreatePaymentCodeParams,
+  CreatePaymentCodesBatchItem,
+  CreatePaymentCodesBatchParams,
+  ListOwnerPaymentCodesParams,
+  RedeemStoredPaymentCodeParams,
+  CancelStoredPaymentCodeParams,
+  ClaimPaymentLinkMode,
+  ClaimPaymentLinkParams,
+  PayPayRequestWithStoredCodeOptions,
+  CurrentPaymentCodeResponse,
+  OwnerPaymentCodesResponse,
+  PaymentCodeDetailsResponse,
+  RedeemStoredPaymentCodeResponse,
+  CancelStoredPaymentCodeResponse,
+  ClaimPaymentLinkResponse,
+  PayPayRequestWithStoredCodeResponse,
+  PaymentCodesBatchResponse,
+} from './current-payment-codes';
 
 // All types & constants
 export * from './types';
