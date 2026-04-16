@@ -36,11 +36,36 @@ export interface RelaiApi {
   updatedAt: string;
 }
 
+/**
+ * OpenAPI-style parameter descriptor (query / path / header).
+ * Shown on the marketplace test form so buyers can fill required inputs.
+ */
+export interface OpenApiParameter {
+  name: string;
+  in: 'query' | 'path' | 'header';
+  required?: boolean;
+  description?: string;
+  schema?: Record<string, unknown>;
+}
+
+/**
+ * OpenAPI-style request body descriptor.
+ * Accepts either the full OpenAPI shape
+ * ({ required, content: { 'application/json': { schema } } })
+ * or a simplified { description?, required?: string[], properties?: {...} } shape.
+ */
+export type OpenApiRequestBody = Record<string, unknown>;
+
 export interface ApiEndpointInput {
   path: string;
   method: string;
   usdPrice: number;
   enabled?: boolean;
+  description?: string;
+  /** Query / path / header parameter descriptors (OpenAPI shape). */
+  parameters?: OpenApiParameter[];
+  /** Request body descriptor for POST/PUT/PATCH endpoints (OpenAPI shape). */
+  requestBody?: OpenApiRequestBody;
 }
 
 export interface ApiEndpoint extends ApiEndpointInput {
@@ -61,6 +86,12 @@ export interface CreateApiInput {
   websiteUrl?: string;
   logoUrl?: string;
   endpoints?: ApiEndpointInput[];
+  /**
+   * Full OpenAPI 3.x specification (object or JSON string). When provided, the spec
+   * is saved and the marketplace UI renders full schemas. If `endpoints` is omitted,
+   * endpoints are derived from the spec's paths with a default price.
+   */
+  openApi?: Record<string, unknown> | string;
 }
 
 export interface UpdateApiInput {
