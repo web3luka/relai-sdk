@@ -113,15 +113,16 @@ export interface CreateApiInput {
   evmCrossChainWallet?: string;
   network: string;
   /**
-   * Facilitator to settle payments through. Defaults to the first supported
-   * facilitator on `network` (e.g. `payai` on solana/base, `relai` on skale-base,
-   * avalanche, telos, ...). Server rejects unsupported (facilitator, network)
-   * combinations with a 400.
+   * Facilitator to settle payments through. Defaults to `relai` whenever the
+   * network supports it (every network except `peaq` and `sei`, which fall back
+   * to `payai`). Server rejects unsupported (facilitator, network) combinations
+   * with a 400.
    */
   facilitator?: Facilitator;
   /**
-   * x402 protocol version. Defaults to the newest version the (facilitator, network)
-   * pair supports. Validated server-side.
+   * x402 protocol version. Defaults to `2` whenever the (facilitator, network)
+   * pair supports v2; v1-only pairs (e.g. `thirdweb` on ethereum) fall back
+   * to v1. Validated server-side.
    */
   x402Version?: X402Version;
   description?: string;
