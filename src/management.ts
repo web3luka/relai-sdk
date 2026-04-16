@@ -56,6 +56,36 @@ export interface OpenApiParameter {
  */
 export type OpenApiRequestBody = Record<string, unknown>;
 
+/**
+ * Known facilitator identifiers. `string` is kept in the union so new
+ * facilitators can be passed without bumping the SDK — the server validates.
+ *
+ * Support matrix (at time of writing — server is source of truth):
+ * - `payai`           solana, solana-devnet, base, base-sepolia, peaq, polygon, sei (v1/v2; peaq+polygon+sei = v1)
+ * - `dexter`          solana, base (v2)
+ * - `openfacilitator` solana, base (v2)
+ * - `relai`           solana, solana-devnet, base, base-sepolia, skale-base, skale-base-sepolia, avalanche, polygon, ethereum, telos (v2)
+ * - `autoincentive`   base, base-sepolia (v2)
+ * - `stratum`         solana, base (v2)
+ * - `thirdweb`        ethereum (v1)
+ * - `0xgasless`       avalanche (v2)
+ * - `custom`          most networks (v1/v2)
+ */
+export type Facilitator =
+  | 'payai'
+  | 'dexter'
+  | 'openfacilitator'
+  | 'relai'
+  | 'autoincentive'
+  | 'stratum'
+  | 'thirdweb'
+  | '0xgasless'
+  | 'custom'
+  | (string & {});
+
+/** x402 protocol version. */
+export type X402Version = 1 | 2;
+
 export interface ApiEndpointInput {
   path: string;
   method: string;
@@ -82,6 +112,18 @@ export interface CreateApiInput {
   /** EVM wallet for cross-chain payments. Only relevant when network is Solana. */
   evmCrossChainWallet?: string;
   network: string;
+  /**
+   * Facilitator to settle payments through. Defaults to the first supported
+   * facilitator on `network` (e.g. `payai` on solana/base, `relai` on skale-base,
+   * avalanche, telos, ...). Server rejects unsupported (facilitator, network)
+   * combinations with a 400.
+   */
+  facilitator?: Facilitator;
+  /**
+   * x402 protocol version. Defaults to the newest version the (facilitator, network)
+   * pair supports. Validated server-side.
+   */
+  x402Version?: X402Version;
   description?: string;
   websiteUrl?: string;
   logoUrl?: string;
