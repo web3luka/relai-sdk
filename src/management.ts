@@ -36,11 +36,66 @@ export interface RelaiApi {
   updatedAt: string;
 }
 
+/**
+ * OpenAPI-style parameter descriptor (query / path / header).
+ * Shown on the marketplace test form so buyers can fill required inputs.
+ */
+export interface OpenApiParameter {
+  name: string;
+  in: 'query' | 'path' | 'header';
+  required?: boolean;
+  description?: string;
+  schema?: Record<string, unknown>;
+}
+
+/**
+ * OpenAPI-style request body descriptor.
+ * Accepts either the full OpenAPI shape
+ * ({ required, content: { 'application/json': { schema } } })
+ * or a simplified { description?, required?: string[], properties?: {...} } shape.
+ */
+export type OpenApiRequestBody = Record<string, unknown>;
+
+/**
+ * Known facilitator identifiers. `string` is kept in the union so new
+ * facilitators can be passed without bumping the SDK — the server validates.
+ *
+ * Support matrix (at time of writing — server is source of truth):
+ * - `payai`           solana, solana-devnet, base, base-sepolia, peaq, polygon, sei (v1/v2; peaq+polygon+sei = v1)
+ * - `dexter`          solana, base (v2)
+ * - `openfacilitator` solana, base (v2)
+ * - `relai`           solana, solana-devnet, base, base-sepolia, skale-base, skale-base-sepolia, avalanche, polygon, ethereum, telos (v2)
+ * - `autoincentive`   base, base-sepolia (v2)
+ * - `stratum`         solana, base (v2)
+ * - `thirdweb`        ethereum (v1)
+ * - `0xgasless`       avalanche (v2)
+ * - `custom`          most networks (v1/v2)
+ */
+export type Facilitator =
+  | 'payai'
+  | 'dexter'
+  | 'openfacilitator'
+  | 'relai'
+  | 'autoincentive'
+  | 'stratum'
+  | 'thirdweb'
+  | '0xgasless'
+  | 'custom'
+  | (string & {});
+
+/** x402 protocol version. */
+export type X402Version = 1 | 2;
+
 export interface ApiEndpointInput {
   path: string;
   method: string;
   usdPrice: number;
   enabled?: boolean;
+  description?: string;
+  /** Query / path / header parameter descriptors (OpenAPI shape). */
+  parameters?: OpenApiParameter[];
+  /** Request body descriptor for POST/PUT/PATCH endpoints (OpenAPI shape). */
+  requestBody?: OpenApiRequestBody;
 }
 
 export interface ApiEndpoint extends ApiEndpointInput {
@@ -57,10 +112,29 @@ export interface CreateApiInput {
   /** EVM wallet for cross-chain payments. Only relevant when network is Solana. */
   evmCrossChainWallet?: string;
   network: string;
+  /**
+   * Facilitator to settle payments through. Defaults to `relai` whenever the
+   * network supports it (every network except `peaq` and `sei`, which fall back
+   * to `payai`). Server rejects unsupported (facilitator, network) combinations
+   * with a 400.
+   */
+  facilitator?: Facilitator;
+  /**
+   * x402 protocol version. Defaults to `2` whenever the (facilitator, network)
+   * pair supports v2; v1-only pairs (e.g. `thirdweb` on ethereum) fall back
+   * to v1. Validated server-side.
+   */
+  x402Version?: X402Version;
   description?: string;
   websiteUrl?: string;
   logoUrl?: string;
   endpoints?: ApiEndpointInput[];
+  /**
+   * Full OpenAPI 3.x specification (object or JSON string). When provided, the spec
+   * is saved and the marketplace UI renders full schemas. If `endpoints` is omitted,
+   * endpoints are derived from the spec's paths with a default price.
+   */
+  openApi?: Record<string, unknown> | string;
 }
 
 export interface UpdateApiInput {
